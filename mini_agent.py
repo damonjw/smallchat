@@ -96,7 +96,8 @@ async def agentic_loop(env: Env) -> list[TextMessageContent]:
         # Execute tools
         tool_results = [await invoke_tool(env, tool_use) for tool_use in tool_uses]
         combined_content = [content_block for tool_result in tool_results for content_block in tool_result]
-        item = UserTranscriptItem(message=UserMessage(content=combined_content))
+        non_interleaved_content = sorted(combined_content, key=lambda x: isinstance(x, TextMessageContent))  # Claude needs all text at the end
+        item = UserTranscriptItem(message=UserMessage(content=non_interleaved_content))
         env.append_to_transcript(item)
 
 
