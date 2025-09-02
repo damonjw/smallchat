@@ -186,16 +186,10 @@ class PostToolUseHookOutput(pydantic.BaseModel):
        user message that contains that previous tool-result.
     4. If continue="true" and decision="block", then reason is shown to the user in grey,
        tool-result and reason both go in the transcript in the current user message,
-       and the assistant is invoked.
+       and the assistant is invoked. Note that in the case of multiple tools with reasons,
+       Claude API requires that all tool-results first followed by all reasons: not interleaved.
     5. If continue="true" and decision=None, then tool-result alone goes in the current user message
-       and the assistant is invoked.
-       
-    In the "continue=true decision=block" case, we said that the tool-result and reason both go
-    into the transcript. This is a problem in case that of multiple tool_use in a single assistant
-    message, because the following user message has content [tool_result#1, reason#1, tool_result#2,
-    reason#2], and the Claude API gives a 400 invalid_request_error saying that the tool_result#2
-    wasn't found: "Each tool_use block must have a corresponding tool_result block in the next message."
-    I think it's just a bug Claude API doesn't extract a message's tool_results correctly."""
+       and the assistant is invoked."""
     continue_: bool
     stopReason: str | None = None
     decision: Literal["block"] | None
