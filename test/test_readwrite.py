@@ -65,7 +65,6 @@ class TestReadSimple:
         success2, r2 = core_tools.read_impl({"file_path": str(self.normal_file), "offset": 1})
         assert success2
         assert isinstance(r2[0], mcp.types.TextContent)
-        assert isinstance(r2[0], mcp.types.TextContent)
         assert r[0].text == r2[0].text
 
     def test_2_normal_result_format(self):
