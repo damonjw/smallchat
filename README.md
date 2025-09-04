@@ -129,7 +129,7 @@ The key architectural observations:
    So can system-prompts.
 
 What this means is that Claude Code can be accurately expressed through
-(1) a small universal interaction+agentic loop (236 loc) which supports hooks
+(1) a small universal interaction+agentic loop (280 loc) which supports hooks
 and subagents, (2) all its "behavior" (system-prompt, system-reminders,
 tool-descriptions, tool-results) can be put into an MCP server.
 I put my own behavior into `--mcp ./core_tools.py`. We could do the same
