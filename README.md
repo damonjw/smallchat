@@ -60,7 +60,8 @@ what tools it has, what behavior they have, when it chooses to send system-remin
 However when it comes to Claude's "secret sauce", i.e. the content of Claude's
 tool-descriptions, system-prompt and system-reminders, this agent has none of
 Claude's magic: it only has its own simple versions. (If Claude's version of these
-things were plugged into this agent, then it would be byte-for-byte identical to Claude).
+things were plugged into this agent, then it would give byte-for-byte identical output
+to Claude).
 
 This agent also prints system-reminders in the UI, so you can understand what's being sent
 and when.
