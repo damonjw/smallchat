@@ -1,7 +1,7 @@
 # Mini-agent
 
 This is a minimal coding assistant with the same behavior as Claude Code.
-Minimal: just 240 loc for the agent, 400 loc for tools, 1200 lop for prompts.
+Minimal: just 280 loc for the agent, 400 loc for tools, 1200 lop for prompts.
 Intuitively it "runs an interactive coding agent":
 ```
 $ python3 -m venv venv
@@ -14,10 +14,12 @@ $ ./mini_agent.py --model gemini/gemini-2.5-pro
 [MODEL: gemini/gemini-2.5-pro + gemini/gemini-2.5-flash]
 [IMPLICIT --mcp builtin]
 [TRANSCRIPT: /Users/ljw1004/.claude/projects/default/2025-09-01.jsonl]
+
 > Please analyze the files in my current directory and tell me what they do.
+
   >> <system-reminder># CLAUDE.md (project instructions) ...</system-reminder>
   >> <system-reminder>Your TODO list is empty. Remember that the TodoWrite tool is a great
-     way to stay on top of compelx tasks.</system-reminder>
+     way to stay on top of complex tasks.</system-reminder>
 [7193 input tokens, 202 response tokens]
   >> LS(...) -> "- /Users/ljw1004/code/mini_agent/\n  - CLAUDE.md\n  - LICENSE
 [4042 cached input tokens, 3912 further input tokens, 204 response tokens]
@@ -26,12 +28,12 @@ $ ./mini_agent.py --model gemini/gemini-2.5-pro
   >> Read(...) -> "    1→from __future__ import annotations\n    2→from path
   >> Read(...) -> "    1→from __future__ import annotations\n    2→from typi
 [55145 input tokens, 5650 further input tokens, 194 response tokens]
-< This project is a minimal coding assistant. Here's a breakdown of the key files:
 
+< This project is a minimal coding assistant. Here's a breakdown of the key files:
 *   `mini_agent.py`: The main script that runs the interactive agent loop.
     It takes user input, communicates with an LLM, and uses tools to perform tasks.
 *   `core_tools.py`: Implements the core functionalities (tools) that the agent
-    can use,such as reading/writing files (`Read`, `Write`, `Edit`), searching
+    can use, such as reading/writing files (`Read`, `Write`, `Edit`), searching
     (`Grep`, `Glob`), and running commands (`Bash`).
 *   `typedefs.py`: Defines the data structures and types used for messages, tools,
     and conversation history (transcripts).
