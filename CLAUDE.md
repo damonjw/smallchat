@@ -1,198 +1,118 @@
-# Mini_agent
+# Mini-Agent: A Minimal Coding Assistant
 
-## File structure and development
+This repository contains a minimal implementation of an LLM-based coding assistant that replicates Claude Code's behavior in just ~280 lines of agent code, 400 lines of tools, and 1200 lines of prompts.
 
-Files:
-- mini_agent.py -- main entrypoint for agentic loop
-- core_tools.py -- MCP server with tools, hooks and system prompts
-- typedefs.py -- type definitions
-- utils.py -- common helpers used by agentic loop
-- test/*.py -- various unit tests
-- test/sample_data -- directory with immutable sample data
+## Overview
 
-Codebase:
-- uses litellm library, to make calls to different LLMs in a uniform way
-- uses watchdog, to be able to notify about file changes
-- uses mcp, for some common tool definitions
-- uses pyright, for typechecking in strict mode
-- uses pytest, for testing
+Mini-agent demonstrates that the behavior of an AI agent is completely characterized by only five things sent to the LLM completion method:
+1. **System prompt** - Instructions and behavior guidelines
+2. **Tool descriptions** - Available functions and their schemas  
+3. **User prompt** - What the user types in
+4. **Tool results** - Outputs from executed tools
+5. **System reminders** - Automatically inserted contextual information
 
-Running and testing:
-- Set up venv and install dependencies:
-```
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-- On subsequent use, just `source venv/bin/activate`.
-- Run the agentic loop:
-```
-OPENAI_API_KEY=redacted    ./mini_agent.py --model gpt-4.1
-GEMINI_API_KEY=redacted    ./mini_agent.py --model gemini/gemini-2.5-pro
-ANTHROPIC_API_KEY=redacted ./mini_agent.py --model anthropic/claude-sonnet-4-20250514
-```
-- Test the mcp server:
-   - `npx @modelcontextprotocol/inspector --cli ./core_tools.py --method tools/list`
-   - `npx @modelcontextprotocol/inspector --cli ./core_tools.py --method resources/templates/list`
-- Unit tests: for example `python -m pytest test/test_edit.py`
+## Architecture
 
+The system consists of four main components:
 
+### Core Files
 
-## Codebase style and guidelines
+- **`mini_agent.py`** (280 lines): Main interaction loop that handles user input, communicates with LLMs, and orchestrates tool execution
+- **`core_tools.py`** (400+ lines): Implements all core tools (Read, Write, Edit, Grep, Glob, LS, Bash, WebFetch, WebSearch, TodoWrite, etc.)  
+- **`adapter.py`**: Model-agnostic interface using `litellm` library to connect to different LLMs (GPT, Claude, Gemini)
+- **`typedefs.py`**: Type definitions for messages, tools, transcripts, and hook systems
 
-All code MUST be written with a high degree of rigor:
-- All functions are documented to say what they do, what side effects they have in any
-- All state variables MUST be documented with INVARIANTS.
-  Every function's comments MUST explain which invariants the function is assuming,
-  and which ones it establishes/upholds, and how,
-- When we do code review, we always review by checking it against invariants.
-- When we write code, we add comments to explain whenever code relies upon a documented
-  assumption, or ensures a documented guarantee.
+### Key Design Patterns
 
-IMPORTANT: The AI agent MUST ALWAYS evaluate code with skepticism and rigor.
+#### 1. Two-Loop Architecture
+The agent operates with nested loops in `mini_agent.py:102-111`:
 
-- IMPORTANT: The AI agent MUST ALWAYS look for flaws, bugs, loopholes,
-  in what the user writes and what the AI agent writes.
-- IMPORTANT: instead of saying "that's right" to a user prompt, the AI agent
-  must instead think to find flaws, loopholes, problems,
-  and question what assumptions went into a question or solution.
-- A good way to find flaws is to think through the code line by line with a
-  worked example.
+1. **Inner "agentic" loop** (`agentic_loop`): Gets LLM responses, executes tools, presents results back to LLM, repeats until no more tool requests
+2. **Outer "user interaction" loop** (`main`): Gets user prompts, runs agentic loop, repeats for next user input
 
-Example: instead of saying "That's right!" say "This approach seems to
-avoid {problem-we-identified}, but has a flaw is that it is non-idiomatic,
-and it hasn't considered the edge case of {counter-example}."
+#### 2. MCP Integration
+All behavior is expressed through Model Context Protocol (MCP):
+- Tools are MCP servers accessible via `--mcp` flag
+- System prompts and reminders delivered through MCP resource system  
+- Hooks implemented as MCP resource reads (e.g., `plan-mode://set/true`)
 
-Coding style: All code must also be clean, documented and minimal. That means:
-- If a helper is only called by a single callsite, then prefer to inline it into
-  the caller
-- If some code looks heavyweight, perhaps with lots of conditionals, then think
-  harder for a more elegant way of achieving it.
-- Code should have comments, and functions should have docstrings.
-  The best comments are ones that introduce invariants, or prove that invariants
-  are being upheld, or indicate which invariants the code relies upon.
-- Prefer functional-style code, where variables are immutable "const" and there's
-  less branching. Prefer to use ternary expressions "x if b else y" rather than
-  separate lines and assignments, if doing so allows for immutable variables.
+#### 3. Hook System
+Three types of hooks modify behavior at runtime:
+- **`UserPromptSubmit`**: Adds context before LLM processing (file changes, TODO reminders, etc.)
+- **`PreToolUse`**: Controls tool execution permissions  
+- **`PostToolUse`**: Handles tool result processing
 
-## Testing conventions
+## How It Works
 
-IMPORTANT: Tests must NEVER modify or delete files in the working directory.
-- The test/sample_data directory contains permanent test fixtures that must NEVER be deleted
-- Tests must NEVER alter the contents of any file in the working directory
-- Tests can ONLY create temporary files in the system tmp directory (e.g., using Python's tempfile module)
-- Any test that needs to create files should use tempfile.mkdtemp() or similar
-- Any test cleanup should only remove files that the test itself created in tmp directories
+### Message Flow
+1. User enters prompt in main loop (`mini_agent.py:46-47`)
+2. `user_prompt_hook` invokes UserPromptSubmit hooks to add context (`mini_agent.py:115-132`)
+3. `agentic_loop` sends messages to LLM via `adapter.acompletion` (`mini_agent.py:69-103`)
+4. LLM response parsed for tool calls (`mini_agent.py:85-94`)
+5. Each tool invoked through `invoke_tool` with Pre/Post hooks (`mini_agent.py:133-189`)
+6. Results fed back to LLM until no more tools requested
+7. Final response displayed to user
 
-Here is an example of rigorous quality code. It covers all the signs of rigor:
-- was the code as simple as could be?
-- does the code work all edge cases, and does it include proof/evidence
-  that we identified all possible edge cases and that it handled them all?
-- were the classes and data-structures the right fit?
-- was logic abstracted out into functions at the right time, not too much,
-  not too little?
-- for mutable state, were the correct invariants identified, established,
-  maintained, proved
-- did we correctly identify the big-O issues and come up with suitable solutions?
-- was async concurrency and re-entrancy handled correctly
-
-```
-/**
- * This function is like fetch(), but it deals with OAuth2 code-flow authentication:
- * - It sends a header "Authorization: Bearer <access_token>" using the access_token in localStorage
- * - If this fails with 401 Unauthorized, it attempts to refresh the access token and try again.
- * - If someone else is busy doing a refresh, it waits for the refresh to finish before trying.
- *
- * <quality>Here we discuss invariants, including the mutable state 'access_token'</quality>
- * INVARIANT: even with are multiple async callers, only one will attempt to refresh the access token at a time
- * INVARIANT: if refreshing fails, then access_token and refresh_token will be cleared, and all underway and
- *            future calls will fail
- *
- * One parameter differs from fetch(): `retryOn429` is called in response to 429 Too Many Requests;
- * if it returns true then we try again, and if it returns false then we give up.
- *
- * <quality>Here we demonstrate that we've considered every possible edge case</quality>
- * The return value is either a successful response, or an error. Two special errors will only occur under
- * specific circumstances: 401 Unauthorized only happens if our attempt to refresh failed (or another async
- * flow attempted the refresh and it failed); and 429 Too Many Requests only happens if retryOn429 returned false.
- */
-export async function authFetch(url: string, retryOn429: () => boolean, options?: RequestInit): Promise<Response> {
-    // <quality>Abstracted out this function at the right time, because it had enough logic that shouldn't be re-written</quality>
-    // <quality>Code is as simple as can be: this helper has no callers other than authFetch, so we inline it.</quality>
-    function f(): Promise<Response> {
-        const accessToken = localStorage.getItem('access_token');
-        if (!accessToken) return Promise.resolve(new Response('Unauthorized: no access_token', { status: 401, statusText: 'Unauthorized' }));
-        options = options ? { ...options } : {};
-        options.headers = new Headers(options.headers);
-        options.headers.set('Authorization', `Bearer ${accessToken}`);
-        return myFetch(url, retryOn429, options);
-    }
-
-    const CLIENT_ID = localStorage.getItem('client_id');
-    if (!CLIENT_ID) return Promise.resolve(new Response('Bad request: no client_id', { status: 400, statusText: 'Bad Request' }));
-    if (AUTH_REFRESH_SIGNAL.willSomeoneSignal) await AUTH_REFRESH_SIGNAL.wait();
-    const r = await f();
-    if (r.status !== 401) return r;
-
-    // 401 Unauthorized.
-    <quality>We are considering re-entrancy, with the possibility that a concurrent caller will be the one who refreshes</quality>
-    if (AUTH_REFRESH_SIGNAL.willSomeoneSignal) {
-        await AUTH_REFRESH_SIGNAL.wait();  // wait until they finished their refresh
-        return f();
-    }
-    // We'll do the refresh
-    AUTH_REFRESH_SIGNAL.willSomeoneSignal = true;
-    try {
-        const refreshToken = localStorage.getItem('refresh_token');
-        if (!refreshToken) return Promise.resolve(new Response('Unauthorized: no refresh_token', { status: 401, statusText: 'Unauthorized' }));
-        const url = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
-        const r = await myFetch(url, noRetryOn429, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: new URLSearchParams({
-                client_id: CLIENT_ID,
-                refresh_token: refreshToken,
-                grant_type: 'refresh_token',
-                scope: 'files.readwrite offline_access',
-            }).toString()
-        });
-        if (!r.ok) {
-            localStorage.removeItem('access_token');
-            localStorage.removeItem('refresh_token');
-            return r;
-        }
-        const tokenData = await r.json();
-        localStorage.setItem('access_token', tokenData.access_token);
-        localStorage.setItem('refresh_token', tokenData.refresh_token);
-    } catch (e) {
-        return errorResponse(url, e);
-    } finally {
-        AUTH_REFRESH_SIGNAL.signal();
-    }
-    return f();
-}
+### Tool Implementation
+Tools in `core_tools.py` follow consistent pattern:
+```python
+def tool_impl(input: dict[str, Any]) -> Tuple[bool, list[mcp.types.ContentBlock]]:
+    # Validate input, perform operation, return (success, content)
 ```
 
+Key tools include:
+- **File Operations**: `Read` (line 127), `Write` (line 260), `Edit` (line 351), `MultiEdit` (line 434)
+- **Search**: `Grep` (line 619), `Glob` (line 517), `LS` (line 718)  
+- **Execution**: `Bash` (line 1151), `Task` (subagent, line 1075)
+- **Web**: `WebFetch` (line 1208), `WebSearch` (line 1279)
+- **Planning**: `TodoWrite` (line 887), `ExitPlanMode` (line 928)
 
-## AI assistant interaction rules
+### State Management
+- **Transcript**: Conversation history stored in JSONL format, compatible with Claude Code
+- **File Tracking**: `known_content_files` and `stale_content_files` track file modifications for notifications
+- **Plan Mode**: Global flag toggled via `plan-mode://set/{true|false}` resource
 
-- IMPORTANT. The AI assistant MUST give advice only (no code edits) in response to user questions.
-  Example: "what's wrong" or "what's the correct way" or "how could we fix" are
-  brainstorming questions and should only result in advice.
-  On the other hand, "please fix it" or "please implement" or "go ahead" are
-  explicit user asks and should result in code edits.
-- Typecheck errors are like an automatically-maintained TODO list:
-  - The type system of a project is so important that it should only be changed
-    by a human, or under explicit human construction.
-    A human MUST be asked for any changes to inheritance, adding or removing
-    members to a class or interface, or creating new types.
-  - If the AI assistant made changes that revealed pre-existing typecheck errors, then
-    it must leave them for now and the user will decide later when
-    and how to address them.
-  - If the AI assistant made changes where there were errors due to a mismatch between
-    new code and existing code, then it should again leave them for the user
-    to decide.
-  - If the AI assistant made changes where the new code has typecheck errors within itself,
-    then it should address them immedaitely.
+### LLM Integration  
+`adapter.py` provides model-agnostic completion:
+- Supports prompt caching for efficiency (lines 23-44)
+- Converts between internal message format and model APIs
+- Handles tool calling across different model providers
+
+## Key Features
+
+### Same Mechanics as Claude Code
+- Identical tool behavior and system prompt structure
+- Compatible transcript format for migration between systems
+- Supports hooks, subagents, and all core tools
+
+### Missing "Secret Sauce"
+While mechanically identical, mini-agent uses simplified versions of:
+- Tool descriptions and schemas
+- System prompts and behavioral instructions  
+- System reminders and contextual hints
+
+### Supported Operations
+- File manipulation with change tracking
+- Code search and navigation
+- Command execution with safety hooks
+- Web browsing and search
+- TODO list management  
+- Plan mode for complex tasks
+- Subagent spawning for specialized tasks
+
+## Usage Examples
+
+```bash
+# Basic usage
+export GEMINI_API_KEY=your_key
+./mini_agent.py --model gemini/gemini-2.5-pro
+
+# Resume from transcript  
+./mini_agent.py --resume transcript.jsonl --model anthropic/claude-sonnet-4
+
+# Non-interactive mode
+./mini_agent.py --no-interactive -p "What files are in the current directory?"
+```
+
+The system demonstrates that sophisticated AI agent behavior emerges from the interaction between a simple execution loop and well-designed tool interfaces, rather than complex agent logic.
+- Whenever you need to update PLAN.md, do so. Don't bother asking for permission. Just let me know afterwards that it's been updated.

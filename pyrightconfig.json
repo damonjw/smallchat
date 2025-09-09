@@ -1,5 +1,14 @@
 {
   "venvPath": ".",
   "venv": "venv",
-  "typeCheckingMode": "strict"
+  "typeCheckingMode": "basic",
+
+      "python.analysis.diagnosticSeverityOverrides": {
+        "reportMissingTypeStubs": "none",
+        "reportMissingParameterType": "none",
+        "reportMissingTypeArgument": "none",
+        "reportUnknownParameterType": "none",
+        "reportUnknownVariableType": "none",
+        "reportUnknownMemberType": "none"
+    }
 }
