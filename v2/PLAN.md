@@ -12,57 +12,111 @@ for investigating agentic behaviours.
   interested in compatability with the existing codebase, nor with
   migration from it. It will be a complete re-implementation from scratch.
 
-**Research goal: explore complex agentic behaviours.** The main goal is to explore complex agentic behaviours. 
-I think it's worth exploring different ways that agents might work, for the following reasons.
-- Claude Code is a clever and useful system. The existing codebase shows that Claude Code
-  is nothing more than a generic agent system with subagents and hooks. This redesigned architecture
-  looks deeper at these features. It keeps subagents pretty much as-is (and calls them Tasks) and has a cleaner 
-  implementation (rather than e.g. the current websearch behaviour is fragmented across the codebase). And it 
-  generalizes hooks (and calls them Compulsions), and gives them greater expressive power.
-- This rewrite tries to achieve a system reminiscent of Smalltalks live-coding environment.
-  Nearly all behaviours are controlled by written text, which the user can inspect and modify.
-  (In this design, we think of written text as "code" and the LLM as an "execution engine". Users can extend 
-  the system by writing new "code" in the form of new agent and tool descriptions.) Such a live-coding
-  environment is good for research. In contrast, the existing codebase doesn't permit us to experiment and 
-  tweak without editing code.
+### Research goal: explore complex agentic behaviours.
 
-**Concrete use cases.** 
-- At the moment, users open multiple terminals with different Claude Code sessions,
-  each with a different system prompt, and they cut-and-paste between them. With this redesign, it will 
-  be trivial for the user to tell the agent "I want you to look at this problem from multiple viewpoints",
-  and to specify those viewpoints. Further, the agent could be given a general instruction: "If it looks
-  like this is a hard problem, or if you're disagreeing with the user, then set up a viewpoint advocating for
-  the user so that you can make sure your points aren't easily rebutted."
-- This architecture is not meant to be limited to coding assistants. It's meant as a general
-  platform for all sorts of AI-assisted work, such as research, literature scanning, and other
-  types of thinking and tool use. The live-coding aspect of this design makes it easier to
-  explore different types of agentic behaviour for these tasks.
+The main goal is to explore complex agentic behaviours. 
+I think it's worth exploring different ways that agents might work.
+We have seen from Claude Code that some agentic cleverness can turn a conventional
+LLM agent into a fantastically useful assistant. The existing codebase is a proof of concept
+that Claude Code can be seen as a generic agent system with two extra mechanisms that affect
+the agentic loop: subagents, and hooks.
+This redesigned architecture is intended as a platform for exploring what can be achieved
+with further mechanisms.
 
-**Complexity versus flexibility.** 
-This rewrite has tried to identify the fundamental 
-primitives of how agentic systems operate. The hope is that with just a few primitives we can have a rich system
-with very few limits to what's possible. This should allow us to have a very simple *implementation*, with
-complex *emergent behaviour*.
-- This is meant as a research experiment, not a production system. If we can get great complexity with a tiny number
-  of primitives, then it's great for research.
-- Several parts of the current design are fragmented across the codebase. For example, look at the system for planning mode, 
-  or for web search; in this redesign they will be unified. Also, the current codebase has two separate agentic loops;
-  in the redesign there will be just one. I claim that the redesign will reduce implementation complexity.
-- Will it be impossible to debug? I think that "debug" is the wrong idea here. The hope is to design
-  a system in which complex autonomous conscious-like behaviour can emerge. Simple engineering ideas
-  about "debugging" simply don't apply to complex emergent systems. I can't "debug" a 
-  human collaborator! The redesign should have full logging of transcripts of course, but I expect they won't
-  be very helpful.
+This rewrite tries to achieve a system reminiscent of Smalltalks live-coding environment, in that
+nearly all behaviours are controlled by written text, which the user can inspect and modify.
+This should allow for rapid prototyping of new features.
+Note that this platform is meant to be used for all sorts if AI-assisted work,
+such as research, teaching, writing, and many other sorts of thinking -- it's not meant to
+be limited to coding assistants. Claude Code (and the existing codebase) have certain agentic
+behaviours that are useful for a coding assistant, but this platform is meant to be general enough
+to help us explore what sort of agent behaviours would be useful in other scenarios.
+That's why a Smalltalk-style live-coding environment, in which the user can specify new
+mechanisms just by giving a text description, is so useful.
+
+Here are some use cases:
+
+- **Debate.** 
+  At the moment, users of Claude Code open multiple terminals with different Claude Code sessions,
+  each with a different system prompt, and they cut-and-paste between them. This allows them to get 
+  multiple perspectives on their code. With this redesign, it will be trivial to achieve this, and
+  we'll be able to experiment with different ways of managing the debate by tweaking the system prompts
+  used by the agent who starts the viewpoints.
+- **Resource constraints.**
+  At the moment, the system has potentially unbounded complexity: Claude Code (and the existing codebase)
+  allow multiple subagents to be spawned in parallel, and each subagent can recursively spawn more subagents.
+  It's natural to be worried about this, and to want to explore ways to constrain resource use.
+  In the existing codebase, we'd have to code our own hooks to achieve this. In the redesign, we 
+  can simply tell the agent to create a Compulsion that monitors subagent creation, and blocks it when 
+  appropriate. It's much simpler that coding our own hooks, and it's more expressive because it has
+  the full power of a language model behind it.
+- **Steel man reasoning.**
+  We could for example create a Compulsion that reminds the agent: "if you're disagreeing with the user,
+  then set up a viewpoint advocating for the user's point of view so that you can make sure your points
+  aren't easily rebutted." This would make for a better experience for precise-minded users, like myself.
+  It would be very fiddly to achieve this in the current system of hooks and tasks, but it'd be trivial
+  to achieve this in the redesign, just by giving textual expression.
+
+
+### The cost of flexibility?
+
+The intention behind this architecture is that it should have just a few primitives that are simple to *implement*,
+and which allow for very complex and sophisticated *emergent behaviour*. This is meant as a platform for exploring 
+possibilities, not a production system. If we can get great complexity with a tiny number
+of primitives, then it's great for exploration.
+
+At its core, this new architecture has just two primitive entities: Agents, and World. Agents can be used in different
+ways to achieve different functionalities.
+- Obviously, the main agentic loop is an Agent.
+- The existing codebase uses hooks. In this new architecture, hooks are implemented as Compulsions, which are
+  nothing more than Agents. In other words, we've done away with some primitives, and we've made it easy
+  to create hooks that have greater expressive power.
+- The existing codebase already uses agents for Tasks. In the new design there is a slight generalization to
+  Viewpoints, which are basically just Tasks with more flexible lifecycle management. (The new design keeps Tasks
+  for convenience, but they could be implemented as Viewpoint agents if we wanted.)
+- In the existing codebase, the functionality is fragmented across multiple parts, and it's hard to follow the
+  execution flow. I believe that the redesign will reduce implementation complexity.
+  - Consider for example websearch, which involves a fiddly division of responsibility between the tool
+    and the main agent loop; in the redesign it will just be a Task with an appropriately written system prompt.
+  - Or consider the hook for Planning Mode, which currently involves a global state variable, callbacks in the main agent
+    loop, and other code in hook handlers. In the redesign, it can be achieved as a simple Compulsion with an 
+    appropriately written system prompt.
 
 **Performance versus flexibility.** This new architecture is considerably more flexible than the existing codebase.
-Will this lead to performance problems? I claim that the new system
-is able to regulate itself using emergent behaviour rather than hard-coded limits.
-- There could be a Compulsion that's 
+Will this lead to performance problems? There may be problems, just as the existing codebase has problems (see
+the earlier discussion about resource constraints). It's well worth investigating resource issues and performance.
+The virtue of this new architecture is that it's easy to trial different types of constraints,
+simply by writing text to describe the constraints we want. This is an easier way to experiment than
+by writing code! For example,
+- To prevent a recursive explosion of Agents, there could be a Compulsion that's 
   set up to watch for excessive spawning of subagents of various types, which it could then block.
-- If a discussion among Viewpoints goes on too long without getting anywhere, a Compulsion could
-  spot this and tell the agent to close the discussion.
-- Note that the existing codebase does have recursive complexity (agents can spawn subagents, which can
-  then spawn subagents themselves), and that it doesn't have any mechanisms for limiting this!
+- To prevent excessive resource use by too many Viewpoints who argue too long without getting anywhere,
+  there could be a Compulsion set up to spot the problem and tell the convening agent to close the discussion,
+  deleting the Viewpoints and freeing up resources.
+- There are also plenty of hard-coded limits that it would be trivial to add should they prove necessary.
+  For example, we could make it so that Compulsion agents are not given access to the *compulsion* action:
+  this would prevent recursive compulsions. This sort of hard-coded limit is trivial to add should it
+  prove necessary, so there's no point building it in the first instance into a platform designed for exploration.
+
+**Understandability versus complexity.** This new architecture might lead to emergent behaviours that
+are very hard to understand. In part, that's a design goal -- to design a system capable of showing rich
+and sophistcated behaviour. But we'll still want to be able to review what's going on, to try to
+gain understanding of the emergent properties. So of course we should support full logging of transcripts.
+I expect we'll need sophisticated ways to process these logs -- we won't get very far by simply reading them.
+
+Note that "debugging" is the classic software engineering sense is not a helpful concept here. This will be much
+more like training a neural network image classifier: the code itself is straightforward (as I argued,
+it has just two core primitives), but the behaviour
+of the resulting system is complex. To "debug" what's wrong with a machine learning classifier we will
+generally need statistical analysis, such as visualisation based on collections of many runs,
+rather than traditional software-engineering style debugging. Likewise, to understand
+the agentic systems I wish to explore here, it's likely that I will need to do data-science investigation of
+collected logs. Thus,
+* For the purposes of building the platform, what matters is that it should generate full logs of transcripts,
+  so that we can see exactly what happened.
+* For the purposes of analysis, we need our general data-science skills to make sense of these collections
+  of logs. It's best practice in data science to start with exploratory analysis; it's premature to
+  propose hypotheses or specific experiments until we have some understanding of the dataset.
 
 
 
@@ -93,7 +147,8 @@ The core Agent loop is to repeatedly perform these two steps:
    - There are some subagents discussed below, Task and Viewpoint and Compulsion.
      They have different default Actions, because they are used in different ways.
    - The LanguageModel doesn't need to know anything about these default actions. The default
-     actions are used purely for control flow.
+     actions are used purely for control flow. The default actions aren't included in the transcript,
+     since they can be easily inferred from context, without any ambiguity.
 2. Perform the Action, and get the result. The TextContent, the Action, and its result are all added to the Transcript.
    - The *request_user_input* Action will show the TextContent to the user, then ask the user what to do next.
      The user's reply becomes the result of the action.
@@ -110,7 +165,7 @@ The core Agent loop is to repeatedly perform these two steps:
 (The two steps, invoking a LanguageModel and invoking a tool on the World, are both async.
 This mirrors the existing codebase.)
 
-In this way, the agent can perform a loop consisting of user input, LanguageModel responses, and tool use.
+This core Agent loop allows for the conventional loop consisting of user input, LanguageModel responses, and tool use.
 There are however some special Actions that have the effect of modifying this basic loop. These special actions
 are associated with Tasks, Viewpoints, and Compulsions. They are described below.
 
@@ -126,10 +181,30 @@ The Tools are how a person interacts with the World. In more detail,
   human analogy) the Transcript is something that's part of a person's thought processes. The World
   has a state, and it doesn't remember its history. (We won't bother with recording transcripts to a file.)
 
+**Observability.** It's worth making a point about default actions. They're not recorded in the transcript in order to maintain
+compatibility and LanguageModel functionality. But they can be trivially inferred from the transcript, for
+the purposes of debugging and analysis. Let me explain in more detail:
+- In existing agent systems, a transcript consists of alternating turns: there will be one or more messages with role="user"
+  or role="system", then a message with role="assistant", then back to the user. It's implied by the role="assistant"
+  message that what follows is either a tool use (if one was specified), or a prompt to the user (if no tool was
+  specified). In other words, the existing setup does implicitly involve default actions that aren't recorded
+  in the transcript.
+- Existing language models have been trained to expect this sort of transcript.
+- It is trivial to deduce from the transcript what the next tool use will be, even if that tool
+  use isn't explicitly stated. For example, in the main agent, if an assistant message doesn't have an explicit
+  too use then the implicit tool *must* be *request_input*. There is no ambiguity.
+- More generally, we will maintain log files that record the type of each agent as well as its transcript.
+  It will therefore be trivial to deduce from the logs what the implied actions are.
+  There is no flexibility: a given agent type always has exactly the same default action.
+
+
 
 ### Tasks
 
 A Task is a subagent, created to perform a specific task. In programming terms, it's like invoking a function.
+
+In terms of implementation, it is simply an Agent. I'm just calling it a Task in this document to highlight
+how it's used, not how it's implemented.
 
 In more detail: The *task* Action initiates a new subagent to perform a task. This Action specifies the template to
 use as the system prompt for the subagent, and the prompt to give it. The subagent then runs its 
@@ -153,6 +228,9 @@ Then assemble all of the digests and ask the Combine assistant to combine them."
 A Viewpoint is another subagent. The difference between a Task subagent and a Viewpoint subagent is that 
 the Viewpoint runs persistently, and there can be several Viewpoints. In programming terms, it's like
 starting several threads.
+
+In terms of implementation, it is simply an Agent. I'm just calling it a Viewpoint in this document to highlight
+how it's used, not how it's implemented.
 
 In more detail: The *viewpoint* Action initiates a new subagent. This Action specifies the template to use
 as the system prompt for the subagent, and a name. The primary Agent can add to this subagent's Transcript
@@ -178,9 +256,12 @@ And it persists until the primary agent decides to remove it.
 ### Compulsions
 
 Compulsions have a similar role to hooks in the current codebase. They modify the primary agent's loop.
-
-A Compulsion is just another agent. It is created by specifying a template to
+A compulsion is created by specifying a template to
 use for the system prompt, plus any further prompt that's needed. The primary agent may have several Compulsions.
+
+In terms of implementation, it is simply an Agent. I'm just calling it a Compulsion in this document to highlight
+how it's used, not how it's implemented. Since it's an Agent it's easy to specify complex behaviours simply
+by writing text. In the current codebase, hooks are code, and to create a complex hook one has to write complex code.
 
 In the primary agent's main loop, its Compulsions are given two chances to intervene: before invoking the LanguageModel,
 and before performing the Action. 
@@ -242,29 +323,50 @@ be deemed to have independent existence outside itself.
 This includes getting user input, reading and writing files, and searching the web. In a larger
 system it would include monitoring real-world sensors such as cameras.
 
-The World consists of two sub-objects, a WorldModel (which has a state capturing the Agent's
-  current understanding of the world including known_content_files) and an RealWorld (which mirrors the
-  actual phsyical world, including the filesystem -- as an object in the codebase it's stateless, but the
-  real physical world underneath obviously has state, and which also maintains a list of tools and
-  connections to MCP servers). This World object will support `subworld = world.newmodel()` which will
-  retain the RealWorld but provide a new empty WorldModel.
+The World object mirrors the actual phsyical world, including the filesystem. So as an object in the
+architecture it's mostly stateless -- but the real physical world underneath obviously has state, and
+the object mirrors this. The only parts of the World that need state are (1) connections to MCP servers,
+which is part of the Env object in the current codebase, and (2) tracking of `known_content_files` 
+as in core_tools in the current codebase.
 
-It's work discussing file-tracking in detail, i.e. known_content_files and stale_content_files. These will
-be implemented as follows:
-* The World keeps track of known_content_files in its WorldModel, and tools like Read and Grep record which
-  files they access.
-* The Agent or subagent, before each LanguageModel interaction, calls World.list_modified_files() to see which
-  files have changed since last read, and uses this to craft a system message.
-* A subagent will have its own World object, created with `subworld = world.newmodel()`. This will
-  share the RealWorld object of its parent Agent, but have its own fresh WorldModel.
-  This will mean that, even when multiple subagents are editing files, each subagent or agent
-  is looking at the same filesystem, and keeps track of which files have been modified by
-  someone else in the interim.
+When an agent creates a subagent, that subagent is given access to the same World object as the original agent.
 
-Arguably, this design is cleaner than the existing mechanism with a global state for `known_content_files`.
-In the existing codebase, if there are several subagents then they may end up with inconsistent knowledge.
-Specifically, suppose agent A reads a file, then spawns subagent B who edits the file then terminates,
-and that agent A then edits the file. In the current system, the global variable will say that "we" know
-about the edit, and therefore agent A will be permitted the write -- when in fact agent A is unaware.
-This WorldModel redesign avoids this inconsistency, since each agent has its own WorldModel that tracks
-which files it has read.
+It will also be possible to specify the actions that a subagent can use, as in the existing codebase. The World will
+have all the tools; the Agent will have a field specifying which tools and actions are allowed. The subagent might be given 
+access to all the parent agent's tools; the subagent might be given a filtered list of tools; or the subagent
+template might specify additional tools that can be found on a specific MCP server.
+- Example use case: if we want to prevent nested Compulsions, we can specify that a Compulsion should
+  not be allowed to use the <compulsion> action, thereby preventing a situation of nested compulsions.
+
+
+#### A possible race condition, and a fix
+
+There is a potential race condition in the current codebase, which
+the new architecture will copy. It's worth documenting this now, and considering how it might be
+fixed. But the existing codebase seems to work well, so I don't see any need to build this fix
+in the first instance -- let's wait until it's clear that the complexity is worth it. The problem 
+is as follows:
+
+1. The current codebase has global state variables for `known_content_files` and `stale_content_files`.
+   It also permits multiple Task agents to operate simulatenously, via async / await.
+2. The purpose of these global variables is to keep track of whether the Agent's transcript
+   has the most recent copy of a file, or whether the file might have changed since.
+   If there are changes, the hook can insert a reminder.
+3. The race condition is this: there may be several Tasks spawned in parallel. If agent A
+   reads a file, agent B reads then writes, then agent A writes, then agent A is writing
+   without the most recent copy in its transcript. Because there's only a single global state
+   variable, the hook isn't clever enough to know *which* agent has up-to-date knowledge 
+   in its transcript.
+
+We could fix this with two changes. (1) Let the World store per-agent state. When an agent spawns
+a subagent, the subagent will get a fresh empty per-agent state. This will be used to keep a record
+of per-agent `known_content_files`. (2) There's still a race condition, because the check of existing files
+and the agent's action are executed asynchronously with async / await, and so a file might be changed
+in between when the FileWatcher reports is findings and when the Agent performs a write action on a file.
+This can be remedied in the standard way, by having timestamps or version numbers or checksums on the files in
+`known_content_files`. -- The respective effects of these two changes will be to (1) provide more specific
+system messages about which files have changed per agent, and (2) give a deterministic guarantee that
+files can't be written unless they've first been read.
+
+As discussed, the existing codebase seems to work well, so the potential race condition doesn't seem
+to hurt in practice, and so in the first instance we won't implement the fix described here.
