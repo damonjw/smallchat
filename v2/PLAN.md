@@ -34,30 +34,22 @@ async def response(self, input):
         result = await self.world.do_action(action)
         transcript.append((action, result))
 ```
-Some more considerations about smart agents:
-- The two steps, invoking a LanguageModel and invoking a tool on the World, are both async.
-  This mirrors the existing codebase.
-- The agent's World keeps track of which actions it's allowed to perform (and as in the current codebase this might be customized
-  for subagents.)
-- Actions might timeout or raise exceptions, exactly as in the existing codebase. We'll take the
-  same approach to dealing with them. Specifically: if there's a problem performing the action,
-  the problem is converted to a text string or strings, and this is then bundled up into a Result
-  that the LanguageModel sees next time round the loop. The output of the `response` function
-  is only ever text, not error objects.
+The two steps, invoking a LanguageModel and invoking a tool on the World, are both async.
+This mirrors the existing codebase.
 
-**Exceptions.** What if it's a dumb agent and its response function throws an exception?
-Or what if in a smart agent there's a failure with the LanguageModel call itself?
-I think the simplest design is to insist on trapping all errors: the LanguageModel.response
-command can invite the user to retry (as in the current codebase), and anyone writing
-a dumb agent should be instructed to trap all exceptions. On the other hand, it's an
-ugly pattern to trap all exceptions when you don't have the context to decide how they
-should be handled. (If Python had resumable exceptions, we could use those, but it doesn't.)
-So perhaps it's cleanest to let exceptions propagate all the way up to the user --
-and to design the system as much as possible for idempotency, so that if the user resolves
-the problem (e.g. resolves failures of the LanguageModel call by re-establishing 
-network connectivity) and resumes the discussion, they'll get sensible behaviour from subagents.
-In fact, won't that happen automatically?
-
+**Error handling.** Exceptions and timeouts can be handled exactly as in the existing codebase.
+- `world.do_action` should always return a ToolResult, consisting of a flag saying whether there
+  was an error, and one or more blocks of TextContent. Any error should be expressed as LLM-readable text, and
+  successful results likewise.
+- `LanguageModel.complete` should not raise an exception. If there is a problem connecting
+  to the language model, or if the language model refuses to answer because of lack of credits,
+  then the LanguageModel object can inform the user and invite them to retry the query (after they've
+  sorted out the issue, presumably).
+- Thus, for a smart agent, `response()` should never raise an exception, it should always return
+  TextContent.
+- The existing codebase doesn't actually have any dumb agents. But, by analogy, it makes sense
+  to expect a dumb agent to never raise an exception. If it does raise an exception, then it's
+  a serious error in the codebase, not something that the platform should try to accommodate.
 
 **Hooks.** Similar to the existing codebase, we will have hooks. However, hooks will themselves be
 Agents. After all, the job of a hook is simply to process its input and return an output, which is
@@ -125,6 +117,12 @@ to check whether this is a subagent or management tools, but there are very few 
 The existing codebase treats all actions as tools, so it doesn't need this switch statement --
 but the price it pays is complex fragmented code, with callback objects and special-case handlers in mini_agent.py. 
 
+The World can keep track of which actions (including primitive tools) an Agent is allowed to perform,
+similar to `Env.tools` in the existing codebase. Alternatively, for smart agents, we could achieve the same
+result by using hooks -- the hook would produce an initial message describing which tools are available,
+and it would also be able to block tool use that it doesn't approve of. This way, the set of allowed
+tools could be modifiable at runtime by the user.
+
 
 ## Subagents
 
@@ -183,8 +181,9 @@ However, what happens to responses is different:
 - The main agent's response is a TextContent which is displayed to the user; then the main loop
   asks the user for input and sends it back to the agent. Whereas the subagents responses are
   all collected together by the *discuss* action, and formatted as a ToolResult object, which
-  the primary agent then processes. It's done this way because all actions expect a ToolResult,
-  and this signifies that the agents principal while-loop should repeat.
+  the primary agent then processes. It's done this way because all actions are designed to
+  return a ToolResult. (This is what tells the agentic loop to continue -- to let the language model
+  have a go at processing the result of the tool.)
 
 
 ### Managing discussions
@@ -488,7 +487,7 @@ The new architecture describes some extra actions, in order to support new featu
 - *meta* and *endo* for hook / subagent duality
 These actions are very simple to implement!
 Each agent simply has a list of hooks and agents, and these actions simply iterate or modify those lists.
-It's utterly trivial code, probably no more than 20 lines at the most. And in return
+It's utterly trivial code, probably no more than 20 lines at the most per action. And in return
 we get a whole host of rich and interesting behaviour possibilities. So I think
 the extra code is worth it! In fact, I think the fact that we can get all this richness with such simple code
 is a sign of how well-designed the new architecture is!
