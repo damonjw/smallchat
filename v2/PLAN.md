@@ -34,12 +34,14 @@ async def response(self, input):
         result = await self.world.do_action(action)
         transcript.append((action, result))
 ```
+Some more considerations about smart agents:
+- The two steps, invoking a LanguageModel and invoking a tool on the World, are both async.
+  This mirrors the existing codebase.
+- The agent's World keeps track of which actions it's allowed to perform (and as in the current codebase this might be customized
+  for subagents.)
+- Actions might timeout or raise exceptions, exactly as in the existing codebase. We'll take the
+  same approach to dealing with them.
 
-(The two steps, invoking a LanguageModel and invoking a tool on the World, are both async.
-This mirrors the existing codebase.)
-
-The agent's World keeps track of which actions it's allowed to perform (and as in the current codebase this might be customized
-for subagents.)
 
 **Hooks.** Similar to the existing codebase, we will have hooks. However, hooks will themselves be
 Agents. After all, the job of a hook is simply to process its input and return an output, which is
@@ -53,7 +55,14 @@ result of the last action and invited to comment on it (just as the existing cod
 for UserPromptSubmit and PostToolUse), and they will be given a proposed action and invited to block
 it (just as the existing codebase as a PreToolUse hook).
 
-Hooks can be Agents, and they may even be SmartAgents. A SmartAgent hook will be easy to experiment
+Hooks can be either dumb agents or smart agents. If the hook is implemented as a dumb agent, then
+it's just a simple stateful object -- exactly like `HaveReadFilesWatcher` in the current codebase --
+and the only difference is that instead of using a method 
+`userpromptsubmithookoutput = HaveReadFilesWatcher.file_changed_hook(userpromptsubmithookinput)`
+we now invoke the hook as
+`response = file_changed_hook.response(input)`.
+
+But by unifying the interface, we now can use smart agents as hooks. A SmartAgent hook will be easy to experiment
 with, simply by rewriting its textual instructions. A language model might even decide to create
 its own SmartAgent hooks!
 
@@ -161,6 +170,20 @@ However, what happens to responses is different:
   the primary agent then processes. It's done this way because all actions expect a ToolResult,
   and this signifies that the agents principal while-loop should repeat.
 
+Question: is there anything special about an "error" response? Should we allow an Agent to
+return an error response? In the existing codebase, if a subagent has an error then that error
+is propagated up as a ToolUse error response. But what if there's a dialog, and one of the participants
+has an error while executing? How will that show up in the result of *discuss*? Do I want the
+other participants to be aware of this error? If I turn the entire discussion into an error,
+won't some of the participants have entries in their transcript that don't correspond to the
+primary agent's observed reality?
+- In the existing code, a tool may report an error. This is turned into an error result,
+  and the LLM gets to see it. The LLM never reports an error itself.
+- Idea: let an agent report an error, with the reason given
+  as ErrorContent like TextContent. It's up to the caller what to do with it.
+  If the caller wants to treat it as a tool, this is wrapped up. If the caller wants
+  to treat it as text, it has the text.
+
 
 ### Managing discussions
 
@@ -180,6 +203,18 @@ It might be useful to have mechanisms for informing subagents in a discussion ab
 is in that discussion. This is a topic for future development. For now, let's try and keep things
 simple: in the description of the *discuss* tool, we might for example instruct that a good
 first discussion topic is asking everyone to introduce themselves, just like a human meeting!
+
+Apparently it's OK to interleave different types of message, e.g. system / user / system / user.
+And to have multiple user messages in a row.
+Apparently we're encouraged to use system messages for background facts, project constraints, tech specs,
+status updates, rules or guidelines, and to use user messages messages that expect a response. So, all 
+text in the discussion should be user messages, since it's all coming from user-like entities.
+
+There are many sorts of discussion types we might like to support, for example
+a one-on-one interation with a contractor, or a meeting room discussion, or an ongoing
+relationship with a consultant or aide. And surely many more! The design of the *discuss* command
+is meant to be the simplest possible primitive that an agent could use to support all
+of these discussion types.
 
 
 ### Performance implications of subagents
@@ -280,6 +315,28 @@ To support hook lifecycles, we can add two actions:
   over which actions each Agent has access to.
 
 
+### Hooks and agency
+
+As a future direction, it might be interesting to consider two extra actions, *meta* and *endo*,
+relating to hooks and agency.
+- *meta* makes the hook become primary, with the existing agent becoming subagent. (The other hooks will
+  remain attached to the now-subagent.) This represents a meta-cognition moment, or an Ah-hah! moment,
+  when the monitoring self steps into the spotlight. This action is available to hooks only.
+- *endo(subagent)* is the opposite. The existing agent becomes a hook, and the specified subagent becomes
+  the primary agent.
+  
+Suppose agent A is interacting with the user. Agent A may start a subagent B to look at a particular issue,
+and that subagent may need user interaction. Agent A can do *endo(B)*, and now the user is talking with 
+the subagent, and A is monitoring what's going on. When A decides that enough has been done, it regains
+control of the session by doing *meta*.
+
+This can enable a use-case such as Socratic teaching method. The initial agent A has an overall teaching
+agenda, and it wants to create a subagent B who will engage the user in dialog. We want B to behave ignorantly,
+asking the user to explain things. The monitor A will keep track of this, and subtly direct B to probe
+the user in areas where the user's argument is weak.
+
+
+
 ## The World
 
 The World is a wrapper for all the means by which an Agent can interact with things that can
@@ -336,22 +393,39 @@ As discussed, the existing codebase seems to work well, so the potential race co
 to hurt in practice, and so in the first instance we won't implement the fix described here.
 
 
-## Who has agency?
+## User interaction
 
-There are several interesting ideas for extensions that can be loosely grouped under the topic of agency.
+It's simple to have /slash commands simply invoke some predefined text using a template. For example,
+"/plan true" could generate the text "Start the hook for being in planning mode". Isn't that how MCP commands work -- 
+they install /slash commands that simply generate some text? Possibly including system text?
+Alternatively, the /slash commands could generate actions to execute straight away, bypassing the hooks
+(who might otherwise disapprove of the action!)
 
-**Talking to subagents.** It might be useful for the user to have a command to list current
+In general, it's easy to think of special-case user commands. But I like the homoiconic design of the
+system -- if a user can do it, an agent should be able to also.
+
+It might be useful for the user to have a command to list current
 hooks and subagents, and to select one of them to start talking to, i.e. to make it the primary agent.
-For example, "/list subagents" and "/talkwith [name]".
+For example, "/subagents" or "/hooks" to list them and "/talkwith [name]".
 This sort of real-time introspection could be very helpful for preliminary debugging and gaining insight.
+This can be done with the proposed *meta* and *endo* actions; the /slash commands are just a slightly
+more user-friendly way to let the user invoke them.
 - A potential issue is confusing the subagent:
   previously the messages it received were from the primary agent asking it to do things; now they'll be
   messages from the user asking it to introspect.
 
-**Passing control.** Suppose the user is talking to agent A, who then creates a subagent B. What if
-agent A itself could pass control to subagent B, so that B is talking directly to the user? This might
-be useful if the primary agent really doesn't have the expertise. But it might be unfriendly to the user.
-And it's unclear how best to do this.
+It'd perhaps be nice if the user could inspect the current transcripts of agents. But I note that
+in Claude Code it's impossible for the user to even talk to subagents, let alone inspect their instructions,
+and Claude Code is nonetheless useful! (Presumably the user
+will have access to a text editor so they can easily view and edit all the stored system prompts and
+agent templates; the system should make sure to use the latest versions of such files, if they've
+been modified by the user in the course of an interactive session.)
+
+
+
+## Future directions
+
+There are several interesting ideas for extensions that can be loosely grouped under the topic of agency.
 
 **Passing on memory.** Suppose agent A has a persistent subagent B who is concerned with some particular matter.
 Suppose agent A then starts a new Task C, and thinks that C would benefit from B's experience. Maybe B could be cloned
@@ -359,15 +433,13 @@ and passed into C as C's subagent.
 
 **Storage.** Smart agent state consists of nothing more than the current transcript, and the set of subagents
 and hooks. This can all be trivially serialized. We could have user command "/dump filename" to dump the present
-agent to a file, possibly remote, and a command "/restore" to bring it back. Perhaps the natural way for /restore
-would be: restore the file into a subagent, then start talking to that subagent. Maybe, when an agent is restored,
+agent to a file, possibly remote, and a command "/restore" to bring it back. (Perhaps the natural way for /restore
+would be: restore the file into a subagent, then *endo* to activate it, then what was the primary agent and 
+is now a hook can *quit*.) Maybe, when an agent is restored,
 it should have a system message telling it that it's just been woken up and it's in a new World. It'd also be nice
 if this could be done automatically, by the agents themselves. Our general philosophy is: if the user can do X, they'll
 want to be able to instruct an agent to do X.
 
-**Meta.** How about if an agent suddenly has a meta-realization? There could be a command *meta* that, when issued
-by agent A, creates a new agent B and makes A a subagent of B. Then B would act as a meta-agent, able to consider
-the actions of A as though they're of a third party.
 
 
 
@@ -380,6 +452,12 @@ The existing codebase has Hooks, and Tasks, and Env. The new architecture's Agen
 subsume and generalize the existing Hooks and Tasks, and the World is mostly a cut-down version
 of the existing Env, plus consolidating some floating constants.
 Both the v1 and the v2 architectures need Actions by which the agents say what they want to do.
+
+It's worth pointing out that even though the new architecture is designed to support complex agentic behaviours
+and relationships, it is NOT a distributed system. The agents and subagents form a tree, not an arbitrary graph.
+Communication only ever flows up and down the tree. Different subtrees are independent, so they can safely
+run in parallel. A parent agent who invokes subagents will not do anything until all of its subagents have finished
+their processing.
 
 I claim that the new architecture achieves several simplifications:
 
@@ -395,11 +473,31 @@ I claim that the new architecture achieves several simplifications:
   I believe is a more elegant architecture. It also means that the smart-agent code will automatically handle
   both subagents and hooks. This reduces the amount of special-case coding.
 
-The new architecture has a slight generalization of subagents, requiring a little more code to keep track of
-them and to support two extra actions, the *discuss* and *terminate* actions. But these are pretty simple actions to implement,
-and in return we get the possibility of interesting and sought-after behaviours such as discussions. So I think
-the extra code is worth it! There's also a possible *quit* action, if we decide it's worth adding richness to
-hooks. Also, when you write out pseudocode for these actions, it turns out to be very little.
+The new architecture describes some extra actions, in order to support new features:
+- *discuss* and *terminate* for dealing with subagents
+- *hook* and *quit* for managing hooks
+- *meta* and *endo* for hook / subagent duality
+These actions are very simple to implement!
+Each agent simply has a list of hooks and agents, and these actions simply iterate or modify those lists.
+It's utterly trivial code, probably no more than 20 lines at the most. And in return
+we get a whole host of rich and interesting behaviour possibilities. So I think
+the extra code is worth it! In fact, I think the fact that we can get all this richness with such simple code
+is a sign of how well-designed the new architecture is!
+
+Indeed, there's an elegant simplicity to these extra actions. There are two types of relationship:
+from an agent UP to a hook, and from an agent DOWN to a task / subagent.
+- We can add or remove in the up-direction with *hook* and *quit*
+- Correspondingly we can add or remove in the down-direction with *task* and *terminate*
+- To change the up-down relationship there are *meta* and *pair*
+If we take as given the idea of hooks (up-relationships) and subagents (down-relationships), this set of six
+actions seems to be essential, and complete. The existing codebase doesn't actually let us add or remove
+hooks, but it's pretty much implied that it should be there (by the way the code has been flexibly structured),
+so this set of six actions is merely rounding out what's already there.
+
+In addition to structural actions, there is needs to be communication:
+- *discuss* is for interactions with subagents, while interactions with hooks are done implicitly in the agent loop.
+Again, the existing codebase supports communication for the up-direction, so the extra action *discuss* is simply
+rounding out what's already there.
 
 
 **Performance versus flexibility.** This new architecture is considerably more flexible than the existing codebase.

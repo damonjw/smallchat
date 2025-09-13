@@ -10,6 +10,14 @@ a little bit of cleverness (hooks and Tasks) is enough to make a fantastically u
 This redesigned architecture is intended as a platform for exploring what can be achieved
 with further mechanisms.
 
+I am primarily interested in ways to create agentic systems to do things that
+are useful to the user. I don't want there to be things that can only be achieved by
+special instruction from the user, or by modifying the codebase: I want a system
+where agents themselves can do these things themselves, on behalf of the user.
+
+
+## General design principles for research platforms
+
 A good design for a research platform is that it should have just a few primitives that are simple to *implement*,
 and which allow for very complex and sophisticated *emergent behaviour*. Think of neural networks, where
 some very simple linear algebra leads to amazing results.
@@ -77,5 +85,4 @@ Hopefully, the new architecture should make it easy to build them.
   we want to nudge short-term tactical thinking to match long-term strategic thinking. In Claude Code, the
   TodoWrite and TodoReminder kind of achieve this -- but they don't allow for very much strategic thinking
   beyond just a bullet list of todo items. Perhaps an agent / subagent design would be better?
-
 
