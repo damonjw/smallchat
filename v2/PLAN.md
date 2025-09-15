@@ -5,6 +5,31 @@ message formats are not relevant at this stage of design. I am not
 interested in compatability with the existing codebase, nor with
 migration from it. It will be a complete re-implementation from scratch.
 
+## TODO
+
+If we have smart-agent hooks then they'll end up with a transcript as big as the main agent,
+which seems like an awful lot. Maybe smart-agent hooks will only be useful if we can sensibly
+trim the transcript. For the existing hooks at least, they don't need to keep much transcript at
+all.
+
+The area of long-term memory planning is something with lots of developments:
+[Hacker-news discussion](https://news.ycombinator.com/item?id=45214908)
+pointing to 
+[Anthropic's description](https://www.anthropic.com/news/memory)
+and
+[ChatGPT memory and the bitter lesson](https://www.shloked.com/writing/chatgpt-memory-bitter-lesson)
+and
+[Claude memory](https://www.shloked.com/writing/claude-memory)
+
+In brief,
+- Claude externalizes the transcript into searchable data. For a hook, maybe we can treat the
+  main agent's transcript as searchable data.
+- Or the hook's transcript can be externalized, keeping only a small working transcript.
+But I don't want to be in the business of keeping track with the latest developments in
+a big field! All I should aim for is to be able to use others' ideas here,
+and maybe make it easy to play around with a few of them if they fit into the
+research agenda of multi-agents and hooks.
+
 
 ## Overview
 
