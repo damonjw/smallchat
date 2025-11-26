@@ -154,9 +154,6 @@ async def main():
 
 """
 Create a subagent, and tell it to find the time of sunset in Cambridge today, then report the answer back to me.
-Create two subagents, one to play the part of Byron and another to play the part of Ghandi.
-Have these two subagents discuss the topic of Artificial Intelligence. Ask them to be brief, so that there's a good back-and-forth rather than. Let the discussion continue for several rounds, then summarize the discussion for me.
-Ask Ghandi what he thinks he learnt from this discussion.
 """
 
 if __name__ == '__main__':

@@ -1,0 +1,5 @@
+Create two subagents, call them Jack and Jill. Jack works in HR, and Jill is an aspiring author. They met by chance in a cafe. Each is possibly looking for romance, but it's not clear if they're suited to each other. Run a discussion between them, for long enough that their romantic chances are clear.
+
+Ask Jill what she thinks she's really looking for.
+
+Tell Jill that it's only through interactions that she'll develop her belief in herself. The idea that she can "want herself first" is just self-help narcissism. Tell her she should run after Jack and take a chance. If she does, continue the discussion.
