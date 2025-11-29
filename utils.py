@@ -23,6 +23,21 @@ async def spinner(awaitable):
         sys.stdout.write("\r" + " " * 30 + "\r")
 
 
+async def try_repeatedly(awaitable):
+    """Retry an async operation indefinitely with exponential backoff."""
+    attempt = 0
+    while True:
+        try:
+            return await awaitable
+        except Exception as e:
+            # TODO: parse e and print a more informative message
+            attempt += 1
+            delay = min(2 ** (attempt - 1), 60)  # Cap at 60 seconds
+            print(f"! Operation failed: {e}")
+            print(f"  Retrying in {delay}s (attempt {attempt})...")
+            await asyncio.sleep(delay)
+
+
 def as_described(desc):
     def decorator(func):
         func.__doc__ = desc + (func.__doc__ or "")

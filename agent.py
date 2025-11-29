@@ -2,7 +2,7 @@ import json
 import collections
 import inspect
 import litellm
-from utils import function_to_tool, spinner, as_described
+from utils import function_to_tool, spinner, as_described, try_repeatedly
 import prompts
 
 
@@ -52,7 +52,7 @@ class Agent:
             assert isinstance(input, str), "Expected a string input"
             self.transcript.append({'role':'user', 'content':input})
         while True:
-            res = await spinner(litellm.acompletion(model=self.language_model, messages=self.transcript, tools=self.world.tools))
+            res = await try_repeatedly(spinner(litellm.acompletion(model=self.language_model, messages=self.transcript, tools=self.world.tools)))
             res = res.choices[0].message
             self.transcript.append(res)
             if not res.tool_calls:
