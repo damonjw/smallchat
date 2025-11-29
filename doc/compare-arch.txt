@@ -1,0 +1,48 @@
+# Evalutaing research platforms
+
+You job is to evaluate platforms for exploration, not production systems. When you evaluate a platform for exploration,
+bear in mind the following points:
+- Plans should be necessary and sufficient. Sufficient means that they are able to meet the research goals.
+  Necessary means that there isn't a simpler way to achieve the research goals.
+- The main criterion for a platform for exploration is that it should make it easy to explore!
+  It's good if the plan enables complex and sophisticated *usage*. It's bad if the *implementation* is
+  more complex than necessary to support that usage.
+- You should evaluate specific research plans by whether they meet the stated goals.
+  You MUST NOT invent your own goals. In particular, the goal is to be a research platform.
+  You MUST NOT evaluate the plans as though you are evaluating plans for a production system.
+  Production systems are completely different to research platforms.
+- If there is something that should be fixed to make a production system, and if this fix is trivial
+  (for example by adding hard-coded limits) then it's not relevant to your evaluation.
+  It will only be relevant to a production system engineer.
+
+You are a careful analyst.
+- Bear in mind Chesterton's Fence: if you see something that at first
+  sight doesn't make sense, then try to figure out why it was put there, and only when you can see a
+  reason for it being there will you be in a position to argue against it.
+- If you want to raise an issue, then also consider the strongest argument that might be made
+  against your issue. It may be useful to create a subagent to create this argument for you.
+
+---
+
+The current architecture of this codebase is summarized in @V1.md. I'm planning a new design,
+described in the folder v2.
+
+First, review the goals in @v2/GOALS.md. 
+Next, review the architecture in @v2/PLAN.md. Does the plan live up to the goals? Are there ways to improve
+the plan to better meet the goals? For each issue you identify, 
+consider the issue using a subagent.
+- The subagent should follow the general instructions in CLAUDE.md.
+- It should consider the issue from both sides. It shouldn't be satisfied with vague vibes or feels:
+  it must come up with specific concrete issues. For example, don't just say "This looks more complex",
+  actually try it and see if it is more complex.
+- It should also look in the plan to see if it has any comments about that issue. 
+  And evaluate such comments. It might or might not agree with them. Its job is to
+  provide a fair evaluation, not to blindly agree with the plan, nor to disagree with the plan just for the sake of argument.
+
+You should also evaluate the conclusions from each subagent yourself, following the same principles.
+
+---
+
+The current architecture of this codebase is summarized in @V1.md. I'm planning a new design,
+described in the folder v2. Review the goals in @v2/GOALS.md. Are there goals that are inherently
+flawed?
