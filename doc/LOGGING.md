@@ -22,7 +22,7 @@ This document describes the logging architecture for session persistence and mul
 Each agent has:
 - **Unique ID**: `agent_001`, `agent_002`, etc.
 - **Transcript**: Ordered list of messages
-- **Parent relationship**: Inferred from causality chain (agent creation caused by parent's tool call)
+- **Parent relationship**: Inferred from temporal ordering (agent creation event appears between parent's tool call and tool result, with matching name)
 - **Metadata**: `language_model`, creation context
 
 ### 2. Messages (Transcript Entries)
@@ -38,7 +38,6 @@ Each message has:
 - **Identity**: `message_id` (unique), `agent_id` (whose transcript)
 - **Content**: `role`, `content`, `tool_calls`, etc.
 - **Utterance reference**: `utterance_ref` (optional) - points to another message when this message represents the same semantic utterance
-- **Causality**: `caused_by` - what prompted this message
 - **Source**: `source` - where this message came from (agent_id, "external", or "system")
 
 ### 3. Utterances
@@ -66,7 +65,33 @@ Messages can come from:
 - **External world** (`source: "external"`) - user input, file changes, async events
 - **System orchestrator** (`source: "system"`) - hook notifications, system events
 
-This forms a **Lamport clock**: message causality relationships establish causal-temporal ordering without requiring explicit timestamps.
+### 5. Inferring Causality from Objective Facts
+
+The log records only objective facts, not programmer intentions. Causality is inferred by the viewer during analysis:
+
+**Assistant messages** (utterances or tool calls):
+- Caused by the entire transcript state at the time of generation
+- Viewer reconstructs transcript by replaying events up to that message
+
+**Tool results**:
+- The `tool_call_id` field directly links to the originating tool call
+- Viewer searches backward for the assistant message containing that `tool_call_id`
+
+**Agent creation events**:
+- Temporal ordering places creation between tool call and tool result
+- The `name` field matches the tool call arguments
+- Viewer parses tool call arguments to match creation events with their originating tool calls
+
+**Cross-agent message delivery**:
+- The `utterance_ref` points to the original utterance
+- The `source` field shows which agent produced it
+- Temporal ordering shows when delivery occurred relative to the utterance
+
+**External events**:
+- `source: "external"` indicates no internal cause
+- These are stimuli from outside the system
+
+This approach maintains the log as a **pure record of facts** rather than encoding interpretations. The temporal ordering in the event stream (combined with objective links like `tool_call_id` and `utterance_ref`) provides a complete causality graph without requiring explicit `caused_by` annotations.
 
 ## Log Format
 
@@ -77,10 +102,10 @@ Append-only JSONL file where each line is an event (agent creation or message):
 ```jsonl
 {"message_id": "msg_001", "event_type": "agent_created", "agent_id": "agent_001", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
 {"message_id": "msg_002", "agent_id": "agent_001", "role": "user", "content": "Create Jack and Jill", "source": "external"}
-{"message_id": "msg_003", "agent_id": "agent_001", "role": "assistant", "content": "I'll create two agents...", "tool_calls": [...], "caused_by": "msg_002"}
-{"message_id": "msg_004", "event_type": "agent_created", "agent_id": "agent_002", "caused_by": "msg_003", "name": "Jack", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
-{"message_id": "msg_005", "agent_id": "agent_002", "role": "assistant", "content": "Hi", "caused_by": "msg_004"}
-{"message_id": "msg_006", "agent_id": "agent_003", "role": "user", "content": "[Jack]: Hi", "source": "agent_002", "utterance_ref": "msg_005", "caused_by": "msg_005"}
+{"message_id": "msg_003", "agent_id": "agent_001", "role": "assistant", "content": "I'll create two agents...", "tool_calls": [...]}
+{"message_id": "msg_004", "event_type": "agent_created", "agent_id": "agent_002", "name": "Jack", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
+{"message_id": "msg_005", "agent_id": "agent_002", "role": "assistant", "content": "Hi"}
+{"message_id": "msg_006", "agent_id": "agent_003", "role": "user", "content": "[Jack]: Hi", "source": "agent_002", "utterance_ref": "msg_005"}
 ```
 
 ### Message Event Schema
@@ -99,7 +124,6 @@ Append-only JSONL file where each line is an event (agent creation or message):
 ```json
 {
   "source": "agent_002|external|system",  // Where this message came from
-  "caused_by": "msg_122",                 // What prompted this message
   "utterance_ref": "msg_120"              // If this represents the same utterance as another message
 }
 ```
@@ -133,13 +157,12 @@ Append-only JSONL file where each line is an event (agent creation or message):
   "message_id": "msg_004",
   "event_type": "agent_created",
   "agent_id": "agent_002",
-  "caused_by": "msg_003",
   "name": "Jack",
   "language_model": "anthropic/claude-sonnet-4-5-20250929"
 }
 ```
 
-The parent agent is inferred by following `caused_by` to the tool call that created this agent. That tool call's `agent_id` is the parent.
+The parent agent is inferred from temporal ordering: the creation event appears between the parent's tool call (to the `task` function) and the corresponding tool result. The `name` field matches the name in the tool call arguments, allowing the viewer to link creation events to their originating tool calls when multiple agents are created concurrently.
 
 ## Concrete Examples
 
@@ -148,37 +171,37 @@ The parent agent is inferred by following `caused_by` to the tool call that crea
 ```jsonl
 {"message_id": "msg_001", "event_type": "agent_created", "agent_id": "agent_root"}
 {"message_id": "msg_002", "agent_id": "agent_root", "role": "user", "content": "Create Jack and Jill for a cafe discussion", "source": "external"}
-{"message_id": "msg_003", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "task", "arguments": "{\"name\": \"Jack\", \"system_prompt\": \"You work in HR...\"}"}}], "caused_by": "msg_002"}
-{"message_id": "msg_004", "event_type": "agent_created", "agent_id": "agent_jack", "caused_by": "msg_003", "name": "Jack"}
+{"message_id": "msg_003", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "task", "arguments": "{\"name\": \"Jack\", \"system_prompt\": \"You work in HR...\"}"}}]}
+{"message_id": "msg_004", "event_type": "agent_created", "agent_id": "agent_jack", "name": "Jack"}
 {"message_id": "msg_005", "agent_id": "agent_jack", "role": "system", "content": "You work in HR..."}
-{"message_id": "msg_006", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c1", "content": "Created subagent: Jack", "caused_by": "msg_003"}
-{"message_id": "msg_007", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c2", "function": {"name": "task", "arguments": "{\"name\": \"Jill\", \"system_prompt\": \"You are an aspiring author...\"}"}}], "caused_by": "msg_006"}
-{"message_id": "msg_008", "event_type": "agent_created", "agent_id": "agent_jill", "caused_by": "msg_007", "name": "Jill"}
+{"message_id": "msg_006", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c1", "content": "Created subagent: Jack"}
+{"message_id": "msg_007", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c2", "function": {"name": "task", "arguments": "{\"name\": \"Jill\", \"system_prompt\": \"You are an aspiring author...\"}"}}]}
+{"message_id": "msg_008", "event_type": "agent_created", "agent_id": "agent_jill", "name": "Jill"}
 {"message_id": "msg_009", "agent_id": "agent_jill", "role": "system", "content": "You are an aspiring author..."}
-{"message_id": "msg_010", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c2", "content": "Created subagent: Jill", "caused_by": "msg_007"}
-{"message_id": "msg_011", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c3", "function": {"name": "discuss", "arguments": "{\"prompt\": \"You meet in a cafe. Introduce yourselves.\", \"speakers\": [\"Jack\", \"Jill\"]}"}}], "caused_by": "msg_010"}
-{"message_id": "msg_012", "agent_id": "agent_jack", "role": "user", "content": "You meet in a cafe. Introduce yourselves.", "source": "agent_root", "caused_by": "msg_011"}
-{"message_id": "msg_013", "agent_id": "agent_jill", "role": "user", "content": "You meet in a cafe. Introduce yourselves.", "source": "agent_root", "caused_by": "msg_011"}
-{"message_id": "msg_014", "agent_id": "agent_jack", "role": "assistant", "content": "Hi, I'm Jack. *extends hand*", "caused_by": "msg_012"}
-{"message_id": "msg_015", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c3", "content": "Hi, I'm Jack. *extends hand*", "utterance_ref": "msg_014", "caused_by": "msg_014"}
-{"message_id": "msg_016", "agent_id": "agent_jill", "role": "user", "content": "[Jack]: Hi, I'm Jack. *extends hand*", "source": "agent_jack", "utterance_ref": "msg_014", "caused_by": "msg_014"}
-{"message_id": "msg_017", "agent_id": "agent_jill", "role": "assistant", "content": "*smiles* Hello Jack, I'm Jill.", "caused_by": "msg_016"}
-{"message_id": "msg_018", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c3", "content": "*smiles* Hello Jack, I'm Jill.", "utterance_ref": "msg_017", "caused_by": "msg_017"}
-{"message_id": "msg_019", "agent_id": "agent_jack", "role": "user", "content": "[Jill]: *smiles* Hello Jack, I'm Jill.", "source": "agent_jill", "utterance_ref": "msg_017", "caused_by": "msg_017"}
+{"message_id": "msg_010", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c2", "content": "Created subagent: Jill"}
+{"message_id": "msg_011", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c3", "function": {"name": "discuss", "arguments": "{\"prompt\": \"You meet in a cafe. Introduce yourselves.\", \"speakers\": [\"Jack\", \"Jill\"]}"}}]}
+{"message_id": "msg_012", "agent_id": "agent_jack", "role": "user", "content": "You meet in a cafe. Introduce yourselves.", "source": "agent_root"}
+{"message_id": "msg_013", "agent_id": "agent_jill", "role": "user", "content": "You meet in a cafe. Introduce yourselves.", "source": "agent_root"}
+{"message_id": "msg_014", "agent_id": "agent_jack", "role": "assistant", "content": "Hi, I'm Jack. *extends hand*"}
+{"message_id": "msg_015", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c3", "content": "Hi, I'm Jack. *extends hand*", "utterance_ref": "msg_014"}
+{"message_id": "msg_016", "agent_id": "agent_jill", "role": "user", "content": "[Jack]: Hi, I'm Jack. *extends hand*", "source": "agent_jack", "utterance_ref": "msg_014"}
+{"message_id": "msg_017", "agent_id": "agent_jill", "role": "assistant", "content": "*smiles* Hello Jack, I'm Jill."}
+{"message_id": "msg_018", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c3", "content": "*smiles* Hello Jack, I'm Jill.", "utterance_ref": "msg_017"}
+{"message_id": "msg_019", "agent_id": "agent_jack", "role": "user", "content": "[Jill]: *smiles* Hello Jack, I'm Jill.", "source": "agent_jill", "utterance_ref": "msg_017"}
 ```
 
 ### Example 2: Inner Monologue
 
 ```jsonl
 {"message_id": "msg_020", "agent_id": "agent_jill", "role": "assistant", "tool_calls": [{"id": "c4", "function": {"name": "task", "arguments": "{\"name\": \"Inner\", \"system_prompt\": \"You are Jill's inner voice...\"}"}}]}
-{"message_id": "msg_021", "event_type": "agent_created", "agent_id": "agent_jill_inner", "caused_by": "msg_020", "name": "Inner"}
+{"message_id": "msg_021", "event_type": "agent_created", "agent_id": "agent_jill_inner", "name": "Inner"}
 {"message_id": "msg_022", "agent_id": "agent_jill_inner", "role": "system", "content": "You are Jill's inner voice..."}
 {"message_id": "msg_023", "agent_id": "agent_jill", "role": "user", "content": "[Jack]: Hi, I'm Jack. *extends hand*", "source": "agent_jack", "utterance_ref": "msg_014"}
-{"message_id": "msg_024", "agent_id": "agent_jill", "role": "assistant", "tool_calls": [{"id": "c5", "function": {"name": "discuss", "arguments": "{\"speakers\": [\"Inner\"], \"prompt\": \"Jack just introduced himself. What should I say?\"}"}}], "caused_by": "msg_023"}
-{"message_id": "msg_025", "agent_id": "agent_jill_inner", "role": "user", "content": "Jack just introduced himself. What should I say?", "source": "agent_jill", "caused_by": "msg_024"}
-{"message_id": "msg_026", "agent_id": "agent_jill_inner", "role": "assistant", "content": "Be friendly but not over-eager. A simple greeting with a smile.", "caused_by": "msg_025"}
-{"message_id": "msg_027", "agent_id": "agent_jill", "role": "tool", "tool_call_id": "c5", "content": "Be friendly but not over-eager. A simple greeting with a smile.", "utterance_ref": "msg_026", "caused_by": "msg_026"}
-{"message_id": "msg_028", "agent_id": "agent_jill", "role": "assistant", "content": "*smiles* Hello Jack, I'm Jill.", "caused_by": "msg_027"}
+{"message_id": "msg_024", "agent_id": "agent_jill", "role": "assistant", "tool_calls": [{"id": "c5", "function": {"name": "discuss", "arguments": "{\"speakers\": [\"Inner\"], \"prompt\": \"Jack just introduced himself. What should I say?\"}"}}]}
+{"message_id": "msg_025", "agent_id": "agent_jill_inner", "role": "user", "content": "Jack just introduced himself. What should I say?", "source": "agent_jill"}
+{"message_id": "msg_026", "agent_id": "agent_jill_inner", "role": "assistant", "content": "Be friendly but not over-eager. A simple greeting with a smile."}
+{"message_id": "msg_027", "agent_id": "agent_jill", "role": "tool", "tool_call_id": "c5", "content": "Be friendly but not over-eager. A simple greeting with a smile.", "utterance_ref": "msg_026"}
+{"message_id": "msg_028", "agent_id": "agent_jill", "role": "assistant", "content": "*smiles* Hello Jack, I'm Jill."}
 ```
 
 Note: Inner's response (msg_026) is only delivered to Jill (via tool result msg_027). It's not a public utterance to Jack, so only Jill receives it.
@@ -187,18 +210,18 @@ Note: Inner's response (msg_026) is only delivered to Jill (via tool result msg_
 
 ```jsonl
 {"message_id": "msg_100", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c9", "function": {"name": "task", "arguments": "{\"name\": \"ResourceMonitor\", \"system_prompt\": \"Monitor resource usage...\"}"}}]}
-{"message_id": "msg_101", "event_type": "agent_created", "agent_id": "agent_resource_hook", "caused_by": "msg_100", "name": "ResourceMonitor"}
+{"message_id": "msg_101", "event_type": "agent_created", "agent_id": "agent_resource_hook", "name": "ResourceMonitor"}
 {"message_id": "msg_102", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c10", "function": {"name": "task", "arguments": "{\"name\": \"Searcher4\"}"}}]}
 {"message_id": "msg_103", "agent_id": "agent_resource_hook", "role": "user", "content": "Agent 'agent_root' is attempting to create subagent 'Searcher4'. Current subagent count: 3. Approve?", "source": "system"}
-{"message_id": "msg_104", "agent_id": "agent_resource_hook", "role": "assistant", "content": "DENY. Maximum subagents (3) already reached.", "caused_by": "msg_103"}
-{"message_id": "msg_105", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c10", "content": "Error: Action blocked by hook 'ResourceMonitor': Maximum subagents (3) already reached.", "caused_by": "msg_102"}
+{"message_id": "msg_104", "agent_id": "agent_resource_hook", "role": "assistant", "content": "DENY. Maximum subagents (3) already reached."}
+{"message_id": "msg_105", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c10", "content": "Error: Action blocked by hook 'ResourceMonitor': Maximum subagents (3) already reached."}
 ```
 
 ### Example 4: External Trigger (Event-Driven)
 
 ```jsonl
 {"message_id": "msg_200", "agent_id": "agent_watcher", "role": "user", "content": "File changed: data.json", "source": "external"}
-{"message_id": "msg_201", "agent_id": "agent_watcher", "role": "assistant", "content": "I'll reload the data and notify the main agent.", "caused_by": "msg_200"}
+{"message_id": "msg_201", "agent_id": "agent_watcher", "role": "assistant", "content": "I'll reload the data and notify the main agent."}
 ```
 
 ## Code Modifications
@@ -217,25 +240,21 @@ class Agent:
         # ... existing code ...
 ```
 
+**Logging responsibility principle:**
+- **Recipients don't track sources**: `pleasenote()` simply adds a message to the transcript
+- **Senders log the utterance**: `inform()` logs the message with source attribution before delivery
+- **External events are logged externally**: The main loop logs user input with `source='external'`
+
 **Add logging hooks:**
 ```python
-def inform(self, input, source=None, utterance_ref=None):
-    """Add a user message to transcript, with logging."""
+def pleasenote(self, input):
+    """Add a user message to transcript."""
     msg = {'role':'user', 'content':input}
     self.transcript.append(msg)
 
-    if hasattr(self, 'logger'):
-        msg_id = self.logger.log_message(
-            agent_id=self.agent_id,
-            message=msg,
-            source=source,
-            utterance_ref=utterance_ref
-        )
-        return msg_id
-
-async def response(self, input=None):
+async def response(self):
     """Generate response, with logging."""
-    # ... existing code to add user message and call LLM ...
+    # ... existing code to call LLM ...
 
     res = res.choices[0].message
     self.transcript.append(res)
@@ -243,8 +262,7 @@ async def response(self, input=None):
     if hasattr(self, 'logger'):
         msg_id = self.logger.log_message(
             agent_id=self.agent_id,
-            message=res,
-            caused_by=self.last_user_message_id  # Track causality
+            message=res
         )
 
         # Return the message_id if this is an utterance (no tool_calls)
@@ -252,6 +270,36 @@ async def response(self, input=None):
             return msg_id
 
     # ... rest of existing code ...
+
+def inform(self, dst, txt, utterance_ref=None):
+    """Send a message from this agent to another agent.
+
+    The sender is responsible for logging the message flow.
+
+    Args:
+        dst: The destination Agent object
+        txt: The text message to send
+        utterance_ref: Optional message_id of the original utterance this represents
+    """
+    # Log the message delivery (sender's responsibility)
+    if hasattr(self, 'logger'):
+        self.logger.log_message(
+            agent_id=dst.agent_id,           # Message appears in dst's transcript
+            message={'role': 'user', 'content': txt},
+            source=self.agent_id,            # But we record it came from self
+            utterance_ref=utterance_ref
+        )
+    # Deliver the message
+    dst.pleasenote(txt)
+
+# For external events (messages from outside the system), log directly:
+# if hasattr(agent, 'logger'):
+#     agent.logger.log_message(
+#         agent_id=agent.agent_id,
+#         message={'role': 'user', 'content': external_input},
+#         source='external'
+#     )
+# agent.pleasenote(external_input)
 ```
 
 ### 2. Discuss Tool (`agent.py`)
@@ -262,10 +310,7 @@ async def discuss(self, prompt=None, speakers=None, listeners=None):
     # Send prompt
     if prompt is not None:
         for s in self.speakers + self.listeners:
-            self.subagents[s].inform(
-                prompt,
-                source=self.agent_id
-            )
+            self.inform(self.subagents[s], prompt)
 
     # Collect responses
     for s in self.speakers:
@@ -280,11 +325,7 @@ async def discuss(self, prompt=None, speakers=None, listeners=None):
             for t in self.speakers + self.listeners:
                 if t == s: continue
                 msg = f"[{s}]: {utterance}"
-                self.subagents[t].inform(
-                    msg,
-                    source=a.agent_id,
-                    utterance_ref=utterance_msg_id
-                )
+                a.inform(self.subagents[t], msg, utterance_ref=utterance_msg_id)
 ```
 
 ### 3. New Module: `session.py`
@@ -299,7 +340,7 @@ class SessionLogger:
         self.session_file = Path(session_file)
         self.message_counter = 1
 
-    def log_message(self, agent_id, message, source=None, caused_by=None, utterance_ref=None):
+    def log_message(self, agent_id, message, source=None, utterance_ref=None):
         """Log a message event."""
         message_id = f"msg_{self.message_counter:03d}"
         self.message_counter += 1
@@ -313,8 +354,6 @@ class SessionLogger:
 
         if source:
             event["source"] = source
-        if caused_by:
-            event["caused_by"] = caused_by
         if utterance_ref:
             event["utterance_ref"] = utterance_ref
         if message.get("tool_calls"):
@@ -328,7 +367,7 @@ class SessionLogger:
 
         return message_id
 
-    def log_agent_created(self, agent_id, caused_by=None, name=None, language_model=None):
+    def log_agent_created(self, agent_id, name=None, language_model=None):
         """Log agent creation."""
         message_id = f"msg_{self.message_counter:03d}"
         self.message_counter += 1
@@ -339,8 +378,6 @@ class SessionLogger:
             "agent_id": agent_id,
             "language_model": language_model
         }
-        if caused_by:
-            event["caused_by"] = caused_by
         if name:
             event["name"] = name
 
@@ -366,25 +403,43 @@ def load_session(session_file):
     agent_transcripts = {}
     agents = {}
 
+    # Track pending tool calls (for inferring agent creation parent)
+    pending_task_calls = []  # Stack of (agent_id, tool_call_id, arguments)
+
     for event in events:
         if event.get("event_type") == "agent_created":
             agent_id = event["agent_id"]
+            name = event.get("name")
 
-            # Infer parent from causality chain
+            # Infer parent from temporal ordering
+            # Find the most recent task tool call whose arguments match this agent's name
             parent_id = None
-            if "caused_by" in event:
-                creation_tool_call = event_by_id[event["caused_by"]]
-                parent_id = creation_tool_call["agent_id"]
+            for caller_id, tool_call_id, args in reversed(pending_task_calls):
+                # Parse arguments to check if name matches
+                if name and name in args:
+                    parent_id = caller_id
+                    break
 
             agents[agent_id] = {
                 "parent_id": parent_id,
-                "name": event.get("name"),
+                "name": name,
                 "language_model": event.get("language_model")
             }
             agent_transcripts[agent_id] = []
         elif "agent_id" in event:
-            # Regular message
             agent_id = event["agent_id"]
+
+            # Track task tool calls for parent inference
+            if event.get("role") == "assistant" and event.get("tool_calls"):
+                for tc in event["tool_calls"]:
+                    if tc.get("function", {}).get("name") == "task":
+                        pending_task_calls.append((
+                            agent_id,
+                            tc["id"],
+                            tc.get("function", {}).get("arguments", "")
+                        ))
+
+            # Regular message
             message = {
                 "role": event["role"],
                 "content": event.get("content")
@@ -467,8 +522,56 @@ class SessionViewer:
 
         return "\n".join(perspective)
 
+    def build_causality_index(self):
+        """Build an index of causal relationships from objective facts.
+
+        Returns a dict mapping message_id -> parent_message_id
+        """
+        causality = {}
+
+        # Index tool calls by their ID
+        tool_calls_by_id = {}  # tool_call_id -> message containing the call
+
+        # Track pending task calls for agent creation
+        pending_task_calls = []  # Stack of message_ids with task tool calls
+
+        for event in self.events:
+            msg_id = event.get("message_id")
+
+            # Track assistant messages with tool calls
+            if event.get("role") == "assistant" and event.get("tool_calls"):
+                for tc in event["tool_calls"]:
+                    tool_calls_by_id[tc["id"]] = msg_id
+                    if tc.get("function", {}).get("name") == "task":
+                        pending_task_calls.append(msg_id)
+
+            # Tool results link to their originating tool call
+            if event.get("role") == "tool" and event.get("tool_call_id"):
+                causality[msg_id] = tool_calls_by_id.get(event["tool_call_id"])
+
+            # Agent creation links to the most recent task tool call with matching name
+            if event.get("event_type") == "agent_created":
+                name = event.get("name")
+                for parent_msg_id in reversed(pending_task_calls):
+                    parent_event = next((e for e in self.events if e.get("message_id") == parent_msg_id), None)
+                    if parent_event:
+                        for tc in parent_event.get("tool_calls", []):
+                            if name and name in tc.get("function", {}).get("arguments", ""):
+                                causality[msg_id] = parent_msg_id
+                                break
+                        if msg_id in causality:
+                            break
+
+            # Messages with utterance_ref link to the original utterance
+            if event.get("utterance_ref"):
+                causality[msg_id] = event["utterance_ref"]
+
+        return causality
+
     def trace_message_flow(self, message_id):
-        """Follow a message's causality chain."""
+        """Follow a message's causality chain using inferred relationships."""
+        causality = self.build_causality_index()
+
         chain = []
         current = message_id
 
@@ -477,7 +580,7 @@ class SessionViewer:
             if not msg:
                 break
             chain.append(msg)
-            current = msg.get("caused_by")
+            current = causality.get(current)
 
         return list(reversed(chain))
 
@@ -524,7 +627,14 @@ async def main():
 
     while True:
         prompt = input("> ")
-        response = await a.response(prompt)
+        # Log external input
+        logger.log_message(
+            agent_id=a.agent_id,
+            message={'role': 'user', 'content': prompt},
+            source='external'
+        )
+        a.pleasenote(prompt)
+        response = await a.response()
         print(response)
 
         # Session is automatically logged via logging hooks
@@ -556,8 +666,8 @@ async def main():
 - Shows what Jill heard, her inner thoughts, and what she said
 
 **Message lineage:**
-- Follow `caused_by` backward to trace causality
-- Follow `utterance_ref` to find original utterance
+- Build causality index from objective facts (tool_call_id, utterance_ref, temporal ordering)
+- Follow causality backward to trace message flow
 - Use `trace_utterance_delivery()` to see who received an utterance
 
 **Hook analysis:**
@@ -574,7 +684,7 @@ async def main():
 
 **Multiple characters (selective info):**
 - Each character only receives messages sent to them
-- Information boundaries enforced by selective `inform()` calls
+- Information boundaries enforced by selective `pleasenote()` calls
 - Character knowledge = their transcript contents
 
 **Event-driven agents:**
@@ -627,9 +737,9 @@ Everything maps to messages:
 
 **Minimal metadata:**
 - Messages: agent_id, role, content
-- Optional: source, caused_by, utterance_ref, tool_calls, tool_call_id
+- Optional: source, utterance_ref, tool_calls, tool_call_id
 - No tool-specific patterns required
-- Emergent properties inferred from message patterns
+- Causality and emergent properties inferred from objective facts
 
 ### 5. Tool Agnosticism
 
@@ -671,7 +781,7 @@ dialog = [msg for msg in events
 - Dialog view (filter utterances by agent set)
 - Hook activity view (filter by source="system")
 - Message flow diagram (visualize utterance_ref across transcripts)
-- Causality chain (trace caused_by backward)
+- Causality chain (infer from tool_call_id, utterance_ref, and temporal ordering)
 - Agent perspective (show what an agent heard, thought, said)
 - Utterance propagation (follow utterance_ref to see who received what)
 
@@ -700,5 +810,8 @@ This logging architecture achieves completeness (can resume sessions), flexibili
 1. **Transcripts are the state** - All agent state is captured in transcript messages
 2. **Utterances are just messages** - No separate entity needed; use utterance_ref for semantic linking
 3. **Tool agnostic** - Viewer filters by role and agent, never needs to know about tool-specific patterns
+4. **Pure fact recording** - Log records only objective facts, not programmer intentions. Causality is inferred from temporal ordering, tool_call_id links, utterance_ref links, and name matching.
 
 This design reduces to one core entity (Messages) while supporting all use cases: multi-agent discussions, inner monologue, hooks, external events, and unknown future cognitive tools. The viewer remains simple and unchanged as new communication patterns emerge.
+
+The log maintains the **normalization principle**: each fact is recorded once in its canonical form, and all relationships are derived from these objective facts during analysis. This makes the log format simpler, more maintainable, and less prone to inconsistencies from encoding programmer interpretations.
