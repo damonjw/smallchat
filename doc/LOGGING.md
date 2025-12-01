@@ -14,20 +14,21 @@ This document describes the logging architecture for session persistence and mul
 3. **Flat structure**: All messages from all agents in a single event stream, tagged with agent IDs
 4. **Minimal abstractions**: Simple core entities that support diverse use cases
 5. **Single-threaded**: No concurrency concerns (asyncio for async operations, not parallel execution)
+6. **Session as state registry**: The Session object is an event-stream backed reflection of the current multi-agent system state
 
 ## Fundamental Entities
 
 ### 1. Agents
 
 Each agent has:
-- **Unique ID**: `agent_001`, `agent_002`, etc.
+- **Unique ID**: `agent_001`, `agent_002`, etc. (allocated by Session)
 - **Transcript**: Ordered list of messages
 - **Parent relationship**: Explicit via `cause` field in agent_created event (points to the tool call that created this agent)
 - **Metadata**: `language_model`, creation context
 
 ### 2. Events
 
-The logging system records two primary event types:
+The logging system records three primary event types:
 
 #### Transcript Entries
 Additions to an agent's transcript:
@@ -55,6 +56,15 @@ Each piece of text has:
 
 **Key distinction**: A `piece_of_text` is NOT added to any agent's transcript. It's an intermediate artifact that will be delivered to agents, who log their own transcript entries with `substance` pointing to the piece of text.
 
+#### Agent Creation
+Records when a new agent is created in the system.
+
+Each agent creation event has:
+- **Identity**: `message_id` (globally unique)
+- **Agent**: `agent_id` (the new agent's ID)
+- **Causation**: `cause` (optional - points to the tool call that created this agent; omitted for root agent)
+- **Metadata**: `name` (optional human-readable name), `language_model`
+
 ### 3. Global ID Space
 
 All events (transcript entries, pieces of text, agent creation) share a single global ID space. This allows any event to reference any other event.
@@ -78,8 +88,14 @@ The `substance` link shows that Jill's message represents Jack's original uttera
 
 ### 5. Responsibility Model
 
+**Session manages state:**
+- Allocates unique agent IDs
+- Logs all events to the event stream
+- Maintains registry of all agents (in-memory and revivifiable)
+- Can reconstruct any agent's state from the event stream
+
 **Agents log their own transcript entries:**
-- `Agent.response()` logs assistant messages and returns a `LoggedString` with its `message_id`
+- `Agent.response()` logs assistant messages via `session.log_transcript_entry()` and returns a `LoggedString` with its `message_id`
 - `Agent.harken(input)` logs user messages, extracting `message_id` from the input if present (used as `substance`)
 
 **LoggedString - logging metadata carrier:**
@@ -126,6 +142,25 @@ msg_002: transcript_entry (Jill: "[Jack]: Hello")           [Jill's user message
 ```
 
 The `substance` link shows that Jill's message represents the same content as Jack's utterance (morally the same, though string is formatted). Hook interventions are visible by comparing content: msg_001 vs msg_002.
+
+### 7. Why Session is Necessary
+
+The Session class is essential for correctness, not just convenience. Consider this scenario:
+
+1. Main agent creates subagent Jack (`agent_002`)
+2. Jack terminates (removed from agent tree)
+3. Session saved and process exits
+4. Session resumed
+5. Main agent creates new subagent Jill
+
+Without Session managing agent IDs, Jill might be allocated `agent_002` again (if agent ID counter wasn't restored), causing ID collision with the terminated Jack in the event log. This would corrupt the viewer's understanding of which events belong to which agent.
+
+Session prevents this by:
+- **Owning both message_counter and agent_counter**: Both restored atomically from the event stream
+- **Maintaining agent registry**: Knows about all agents that have ever existed
+- **Single restoration path**: Impossible to resume session without restoring both counters
+
+This ensures the event stream remains an unambiguous, consistent record across session resumptions.
 
 ## Log Format
 
@@ -295,13 +330,9 @@ Note: The hook agent receives a prompt (msg_103) asking for approval, responds w
 
 Note: External events appear as user messages in the agent's transcript, fitting naturally into the same model as agent-to-agent communication.
 
-## LoggedString: Separating Operational and Logging Concerns
+## Public API Specifications
 
-### Design Philosophy
-
-**The problem:** Content identity (substance) is purely a logging concern. During execution, the system knows what content messages represent implicitly through the call stack. Adding metadata parameters throughout the code pollutes operational logic with logging concerns.
-
-**The solution:** Use a string subclass that carries its message_id invisibly:
+### LoggedString Class
 
 ```python
 class LoggedString(str):
@@ -310,613 +341,299 @@ class LoggedString(str):
     During execution, content identity is implicit in the call stack. This class
     externalizes that runtime information for logging without changing APIs.
 
-    Args:
-        content: The string content
-        message_id: The message_id identifying the substance of this content
+    Attributes:
+        message_id: The message_id identifying the substance of this content.
             - For originals: their own message_id in the log
             - For formatted versions: the original content's message_id
     """
+
     def __new__(cls, content, message_id=None):
-        instance = super().__new__(cls, content)
-        instance.message_id = message_id
-        return instance
+        """Create a LoggedString with optional message_id metadata.
+
+        Args:
+            content: The string content
+            message_id: Optional message_id for substance tracking
+
+        Returns:
+            LoggedString instance that behaves as a normal string
+        """
 ```
 
-### Usage Patterns
+### Session Class
 
-**Utterance (original content):**
 ```python
-# Agent generates original utterance
-utterance = await agent.response()
-# Returns: LoggedString("Hello", message_id="msg_015")
-# When logged, this becomes a transcript_entry with message_id="msg_015" (no substance field)
-```
+class Session:
+    """Event-stream backed representation of multi-agent system state.
 
-**piece_of_text (parent's broadcast):**
-```python
-# Parent creates broadcast prompt
-prompt_id = logger.log_piece_of_text(
-    agent_id=self.agent_id,
-    content="Please introduce yourselves",
-    cause=tool_call_msg_id
-)
-# This logs: {message_id: "msg_012", event_type: "piece_of_text", agent_id: "agent_root", content: "...", cause: "msg_011"}
-# Returns: "msg_012"
+    The Session maintains the authoritative registry of all agents and can revivify
+    any agent from the event stream on demand. It manages both message_id and
+    agent_id allocation, ensuring unique IDs across session resumptions.
 
-# Create LoggedString for delivery
-prompt_str = LoggedString("Please introduce yourselves", message_id=prompt_id)
-```
-
-**Formatted utterance (same substance as original):**
-```python
-# Format Jack's utterance for delivery
-msg = LoggedString(
-    f"[Jack]: {utterance}",
-    message_id=utterance.message_id  # Points to original utterance
-)
-# The string is "[Jack]: Hello" but the message_id still points to msg_015
-```
-
-**Received message:**
-```python
-# Deliver to recipient
-recipient.harken(msg)
-# harken() extracts msg.message_id and logs it as the substance field
-# Logs: {message_id: "msg_017", substance: "msg_015", ...}
-```
-
-### Benefits
-
-1. **Clean separation:** Operational code works with strings; logging extracts metadata
-2. **No API changes:** `harken(self, input)` signature unchanged
-3. **Implicit metadata:** Logging information travels with the string invisibly
-4. **Type compatibility:** LoggedString is a string subclass, works anywhere strings work
-5. **Semantic clarity:** message_id represents the substance (what content this is)
-
-## Code Modifications
-
-### 1. Agent Class (`agent.py`)
-
-**Add agent ID tracking:**
-```python
-class Agent:
-    _next_id = 1
-
-    def __init__(self, init_prompt=None):
-        self.agent_id = f"agent_{Agent._next_id:03d}"
-        Agent._next_id += 1
-        self.language_model = 'anthropic/claude-sonnet-4-5-20250929'
-        # ... existing code ...
-```
-
-**Logging responsibility principle:**
-- **Agents log their own transcript entries**: `harken()` and `response()` log what enters the agent's transcript
-- **LoggedString carries metadata**: Logging metadata (message_id) travels invisibly with strings
-- **Clean separation**: Operational code unaware of logging; logging code extracts metadata
-
-**Add logging methods:**
-```python
-def harken(self, input):
-    """Add a user message to transcript.
-
-    Args:
-        input: The message content (may be a LoggedString with message_id)
+    This class is necessary for correctness: without it, agent IDs could collide
+    when resuming sessions where agents have been created and terminated.
     """
-    # Operational: just use as string
-    msg = {'role': 'user', 'content': str(input)}
-    self.transcript.append(msg)
 
-    # Logging: extract metadata if present
-    if hasattr(self, 'logger'):
-        substance = getattr(input, 'message_id', None)
-        self.logger.log_transcript_entry(
-            agent_id=self.agent_id,
-            message=msg,
-            substance=substance
-        )
+    @staticmethod
+    def load(session_file):
+        """Load existing session and restore all state from event stream.
 
-async def response(self):
-    """Generate response, with logging."""
-    # ... existing code to call LLM ...
+        Reads the event stream once to extract:
+        - Maximum message_id (to restore message counter)
+        - Maximum agent_id (to restore agent counter)
+        - Metadata for all agents that exist/existed
 
-    res = res.choices[0].message
-    self.transcript.append(res)
+        Args:
+            session_file: Path to JSONL session file
 
-    # Logging: log and get message_id
-    msg_id = None
-    if hasattr(self, 'logger'):
-        msg_id = self.logger.log_transcript_entry(
-            agent_id=self.agent_id,
-            message=res
-        )
+        Returns:
+            Session instance with counters and metadata restored
+        """
 
-    # Return LoggedString with message_id pointing to itself (original)
-    content = res.get('content', '')
-    return LoggedString(content, message_id=msg_id)
+    def allocate_agent_id(self):
+        """Allocate a new unique agent ID.
 
-def inform(self, dst, txt):
-    """Send a message from this agent to another agent.
+        Called by Agent.__init__ to get a unique ID.
 
-    Args:
-        dst: The destination Agent object
-        txt: The text message to send (may be LoggedString with metadata)
-    """
-    # Deliver the message (metadata travels with it)
-    dst.harken(txt)
-```
+        Returns:
+            Unique agent_id (e.g., "agent_003")
+        """
 
-### 2. Discuss Tool (`agent.py`)
+    def log_agent_created(self, agent_id, cause=None, name=None, language_model=None):
+        """Log agent creation event.
 
-**Add substance tracking with piece_of_text and LoggedString:**
-```python
-async def discuss(self, prompt=None, speakers=None, listeners=None):
-    # Send prompt to all participants
-    if prompt is not None:
-        # Create a piece_of_text for the prompt (sent to multiple recipients)
-        prompt_msg_id = None
-        if hasattr(self, 'logger'):
-            # Get the tool call that triggered this discuss
-            tool_call_id = self.transcript[-1].get('tool_calls', [{}])[0].get('id')
-            tool_call_msg_id = self._find_msg_with_tool_call(tool_call_id)
+        Called by tool code after creating an agent (not by Agent.__init__).
+        Only the parent/tool knows the cause and name context.
 
-            prompt_msg_id = self.logger.log_piece_of_text(
-                agent_id=self.agent_id,
-                content=prompt,
-                cause=tool_call_msg_id
-            )
+        Args:
+            agent_id: The unique ID for this agent
+            cause: message_id of tool call that created this (None for root)
+            name: Optional human-readable name
+            language_model: The model this agent uses
 
-        # Create LoggedString with message_id pointing to piece_of_text
-        prompt_str = LoggedString(prompt, message_id=prompt_msg_id)
-
-        # Deliver to all participants
-        for s in self.speakers + self.listeners:
-            self.inform(self.subagents[s], prompt_str)
-
-    # Collect responses from speakers
-    for s in self.speakers:
-        a = self.subagents[s]
-        utterance = await a.response()
-        # utterance is LoggedString with message_id (no need to access transcript!)
-
-        # Format the utterance for delivery (no piece_of_text needed)
-        # The formatted message represents the same content (substance) as the original utterance
-        msg = LoggedString(
-            f"[{s}]: {utterance}",
-            message_id=utterance.message_id  # Points to original utterance
-        )
-
-        # Deliver to other participants
-        for t in self.speakers + self.listeners:
-            if t == s: continue
-            a.inform(self.subagents[t], msg)
-```
-
-Note: piece_of_text is only created for the parent's broadcast prompt (with `cause` field), not for formatted utterances. The formatted "[Jack]: Hello" message has message_id pointing directly to Jack's original utterance, which becomes the `substance` when Jill logs receiving it.
-
-### 3. New Module: `session.py`
-
-**LoggedString class:**
-```python
-class LoggedString(str):
-    """A string with its message_id for logging.
-
-    During execution, content identity is implicit in the call stack. This class
-    externalizes that runtime information for logging without changing APIs.
-
-    Args:
-        content: The string content
-        message_id: The message_id identifying the substance of this content
-            - For originals: their own message_id in the log
-            - For formatted versions: the original content's message_id
-    """
-    def __new__(cls, content, message_id=None):
-        instance = super().__new__(cls, content)
-        instance.message_id = message_id
-        return instance
-```
-
-**Session logger:**
-```python
-import json
-from pathlib import Path
-
-class SessionLogger:
-    def __init__(self, session_file):
-        self.session_file = Path(session_file)
-        self.message_counter = self._get_last_message_id() + 1
-
-    def _get_last_message_id(self):
-        """Get the highest message_id from existing log for resumption."""
-        if not self.session_file.exists():
-            return 0
-        last_id = 0
-        with open(self.session_file, 'r') as f:
-            for line in f:
-                event = json.loads(line)
-                if 'message_id' in event:
-                    # Extract number from "msg_123"
-                    num = int(event['message_id'].split('_')[1])
-                    last_id = max(last_id, num)
-        return last_id
+        Returns:
+            message_id of the logged event
+        """
 
     def log_transcript_entry(self, agent_id, message, substance=None):
         """Log a transcript entry event.
+
+        Called by Agent.harken() and Agent.response() to log messages.
 
         Args:
             agent_id: The agent whose transcript this appears in
             message: The message dict (role, content, tool_calls, etc.)
             substance: Optional - what content does this morally represent?
                       (omit if this entry represents itself - new, original content)
+
+        Returns:
+            message_id of the logged event
         """
-        message_id = f"msg_{self.message_counter:03d}"
-        self.message_counter += 1
-
-        event = {
-            "message_id": message_id,
-            "event_type": "transcript_entry",
-            "agent_id": agent_id,
-            "role": message.get("role"),
-            "content": message.get("content")
-        }
-
-        if message.get("tool_calls"):
-            event["tool_calls"] = message["tool_calls"]
-        if message.get("tool_call_id"):
-            event["tool_call_id"] = message["tool_call_id"]
-            event["name"] = message.get("name")
-        if substance:
-            event["substance"] = substance
-
-        # Append to JSONL file
-        with open(self.session_file, 'a') as f:
-            f.write(json.dumps(event) + '\n')
-
-        return message_id
 
     def log_piece_of_text(self, agent_id, content, cause):
         """Log a piece of text event.
 
+        Called by tools that generate content for broadcast to multiple agents.
+
         Args:
             agent_id: The agent that created this text
             content: The text content
-            cause: The message_id of the tool call that generated this (can be a list)
+            cause: message_id of the tool call that generated this (can be a list)
+
+        Returns:
+            message_id of the logged event
         """
-        message_id = f"msg_{self.message_counter:03d}"
-        self.message_counter += 1
-
-        event = {
-            "message_id": message_id,
-            "event_type": "piece_of_text",
-            "agent_id": agent_id,
-            "content": content,
-            "cause": cause
-        }
-
-        with open(self.session_file, 'a') as f:
-            f.write(json.dumps(event) + '\n')
-
-        return message_id
-
-    def log_agent_created(self, agent_id, cause=None, name=None, language_model=None):
-        """Log agent creation.
-
-        Args:
-            agent_id: The unique ID for this agent
-            cause: The message_id of the tool call that created this agent (None for root agent)
-            name: Optional human-readable name
-            language_model: The model this agent uses
-        """
-        message_id = f"msg_{self.message_counter:03d}"
-        self.message_counter += 1
-
-        event = {
-            "message_id": message_id,
-            "event_type": "agent_created",
-            "agent_id": agent_id,
-            "language_model": language_model
-        }
-        if cause:
-            event["cause"] = cause
-        if name:
-            event["name"] = name
-
-        with open(self.session_file, 'a') as f:
-            f.write(json.dumps(event) + '\n')
-
-        return message_id
 ```
 
-**Session loader:**
+### load_session Function
+
 ```python
 def load_session(session_file):
-    """Reconstruct agent tree from event log."""
-    events = []
-    with open(session_file, 'r') as f:
-        for line in f:
-            events.append(json.loads(line))
+    """Load session and reconstruct agent tree.
 
-    # Group transcript entries by agent_id
-    agent_transcripts = {}
-    agents = {}
+    For new sessions: Creates root agent and empty Session
+    For existing sessions: Loads Session with restored counters and metadata,
+                          then reconstructs the full agent tree from event stream
 
-    # Build index of message_id -> agent_id for finding parent agents
-    msg_to_agent = {}
+    Args:
+        session_file: Path to JSONL session file
 
-    for event in events:
-        event_type = event.get("event_type")
-        msg_id = event.get("message_id")
-
-        if event_type == "transcript_entry":
-            agent_id = event["agent_id"]
-            msg_to_agent[msg_id] = agent_id
-
-            # Build message for transcript
-            message = {
-                "role": event["role"],
-                "content": event.get("content")
-            }
-            if "tool_calls" in event:
-                message["tool_calls"] = event["tool_calls"]
-            if "tool_call_id" in event:
-                message["tool_call_id"] = event["tool_call_id"]
-
-            if agent_id not in agent_transcripts:
-                agent_transcripts[agent_id] = []
-            agent_transcripts[agent_id].append(message)
-
-        elif event_type == "agent_created":
-            agent_id = event["agent_id"]
-            cause_msg_id = event.get("cause")
-
-            # Find parent agent from cause
-            parent_id = msg_to_agent.get(cause_msg_id) if cause_msg_id else None
-
-            agents[agent_id] = {
-                "parent_id": parent_id,
-                "name": event.get("name"),
-                "language_model": event.get("language_model")
-            }
-            if agent_id not in agent_transcripts:
-                agent_transcripts[agent_id] = []
-
-    # Reconstruct agent tree
-    def build_agent(agent_id):
-        agent = Agent(init_prompt=agent_transcripts[agent_id])
-        agent.agent_id = agent_id
-        agent.language_model = agents[agent_id]["language_model"]
-
-        # Find and build subagents
-        for aid, info in agents.items():
-            if info["parent_id"] == agent_id:
-                name = info["name"]
-                agent.subagents[name] = build_agent(aid)
-
-        return agent
-
-    # Find root agent (no parent)
-    root_id = next(aid for aid, info in agents.items() if info["parent_id"] is None)
-
-    # Restore Agent._next_id to avoid ID collisions
-    max_id = max(int(aid.split('_')[1]) for aid in agents.keys())
-    Agent._next_id = max_id + 1
-
-    return build_agent(root_id)
+    Returns:
+        Tuple of (root_agent, session)
+        - root_agent: The root agent with full tree of subagents loaded
+        - session: Session instance with all state restored
+    """
 ```
 
-**Session viewer:**
+### Agent Class Interface
+
+```python
+class Agent:
+    """An LLM-powered agent with transcript and subagents.
+
+    Agents require a Session for ID allocation and logging.
+    """
+
+    def __init__(self, session, system_prompt=None, init_prompt=None):
+        """Create agent with required session.
+
+        The agent allocates its ID from the session. The parent/tool is responsible
+        for calling session.log_agent_created() with the cause and name context.
+
+        Args:
+            session: Session for ID allocation and logging (required)
+            system_prompt: Optional system prompt
+            init_prompt: Optional initial transcript (for resumption)
+        """
+
+    def harken(self, input):
+        """Add a user message to transcript.
+
+        Extracts message_id from input if it's a LoggedString,
+        and logs it as the substance field via session.log_transcript_entry().
+
+        Args:
+            input: The message content (may be LoggedString with metadata)
+        """
+
+    async def response(self):
+        """Generate response and log it.
+
+        Logs the response via session.log_transcript_entry() and returns
+        a LoggedString carrying the message_id.
+
+        Returns:
+            LoggedString with message_id pointing to itself (original content)
+        """
+
+    def inform(self, dst, txt):
+        """Send a message from this agent to another agent.
+
+        Args:
+            dst: The destination Agent object
+            txt: The text message (may be LoggedString with metadata)
+        """
+```
+
+### SessionViewer Class
+
 ```python
 class SessionViewer:
+    """Viewer for extracting different perspectives from session logs.
+
+    Provides tool-agnostic views of agent interactions by following
+    substance and cause links in the event stream.
+    """
+
     def __init__(self, session_file):
-        self.events = []
-        with open(session_file, 'r') as f:
-            for line in f:
-                self.events.append(json.loads(line))
+        """Load session events for viewing.
+
+        Args:
+            session_file: Path to JSONL session file
+        """
 
     def list_agents(self):
-        """List all agents in the session."""
-        agents = {}
-        for event in self.events:
-            if event.get("event_type") == "agent_created":
-                agents[event["agent_id"]] = event.get("name", event["agent_id"])
-        return agents
+        """List all agents in the session.
+
+        Returns:
+            Dict mapping agent_id to name
+        """
 
     def get_transcript(self, agent_id):
-        """Get all transcript_entry events for a specific agent."""
-        return [e for e in self.events
-                if e.get("event_type") == "transcript_entry"
-                and e.get("agent_id") == agent_id]
+        """Get all transcript_entry events for a specific agent.
+
+        Args:
+            agent_id: The agent whose transcript to retrieve
+
+        Returns:
+            List of transcript_entry event dicts
+        """
 
     def extract_dialog(self, agent_ids):
         """Extract distinct messages exchanged between selected agents.
 
         Uses substance to identify when multiple agents received the same message,
         showing each distinct piece of content only once.
+
+        Args:
+            agent_ids: List of agent IDs to include in dialog
+
+        Returns:
+            List of distinct messages (deduplicated by substance)
         """
-        # Collect all transcript entries for selected agents
-        entries = []
-        for e in self.events:
-            if (e.get("event_type") == "transcript_entry" and
-                e.get("agent_id") in agent_ids):
-                entries.append(e)
-
-        # Track which substances we've already shown
-        seen_content = set()
-        dialog = []
-
-        for entry in entries:
-            # Get the substance: either explicit substance field, or the entry itself
-            substance = entry.get("substance", entry["message_id"])
-
-            # Skip if we've already shown this content
-            if substance in seen_content:
-                continue
-
-            seen_content.add(substance)
-
-            # Get the content from the substance message
-            content = self._get_content(substance)
-            if content:
-                dialog.append({
-                    "message_id": substance,
-                    "content": content
-                })
-
-        return dialog
-
-    def _get_content(self, message_id):
-        """Get content for a message by ID, handling both transcript_entry and piece_of_text."""
-        event = next((e for e in self.events if e.get("message_id") == message_id), None)
-        if not event:
-            return None
-        return event.get("content")
 
     def extract_agent_perspective(self, agent_id):
-        """Show what an agent heard, thought, and said."""
-        transcript = self.get_transcript(agent_id)
+        """Show what an agent heard, thought, and said.
 
-        perspective = []
-        for msg in transcript:
-            if msg["role"] == "user":
-                perspective.append(f"[Heard]: {msg['content']}")
-            elif msg["role"] == "assistant":
-                if msg.get("tool_calls"):
-                    perspective.append(f"[Action]: {msg.get('content', 'Taking action...')}")
-                else:
-                    perspective.append(f"[Said]: {msg['content']}")
-            elif msg["role"] == "tool":
-                perspective.append(f"[Received]: {msg['content']}")
+        Args:
+            agent_id: The agent whose perspective to extract
 
-        return "\n".join(perspective)
+        Returns:
+            Formatted string showing agent's perspective
+        """
 
     def build_causality_index(self):
         """Build an index of causal relationships.
 
-        Returns a dict mapping message_id -> parent_message_id
+        Returns:
+            Dict mapping message_id -> parent_message_id
         """
-        causality = {}
-
-        # Index tool calls by their ID
-        tool_calls_by_id = {}
-
-        for event in self.events:
-            msg_id = event.get("message_id")
-            event_type = event.get("event_type")
-
-            # Track tool calls
-            if event_type == "transcript_entry" and event.get("tool_calls"):
-                for tc in event["tool_calls"]:
-                    tool_calls_by_id[tc["id"]] = msg_id
-
-            # Tool results link via tool_call_id
-            if event_type == "transcript_entry" and event.get("tool_call_id"):
-                causality[msg_id] = tool_calls_by_id.get(event["tool_call_id"])
-
-            # Transcript entries link via substance
-            if event_type == "transcript_entry" and event.get("substance"):
-                causality[msg_id] = event["substance"]
-
-            # Pieces of text link via cause
-            if event_type == "piece_of_text" and event.get("cause"):
-                causality[msg_id] = event["cause"]
-
-        return causality
 
     def trace_message_flow(self, message_id):
-        """Follow a message's causality chain."""
-        causality = self.build_causality_index()
+        """Follow a message's causality chain.
 
-        chain = []
-        current = message_id
+        Args:
+            message_id: Starting message to trace
 
-        while current:
-            msg = next((e for e in self.events if e.get("message_id") == current), None)
-            if not msg:
-                break
-            chain.append(msg)
-            current = causality.get(current)
-
-        return list(reversed(chain))
+        Returns:
+            List of events in causality chain (oldest to newest)
+        """
 
     def trace_content_references(self, content_msg_id):
-        """Find all messages that represent this content (have it as their substance)."""
-        return [e for e in self.events
-                if e.get("event_type") == "transcript_entry"
-                and e.get("substance") == content_msg_id]
-```
+        """Find all messages that represent this content.
 
-### 4. Main Script (`agent.py`)
+        Finds all transcript_entry events that have this message_id
+        as their substance field.
 
-**Add session logging:**
-```python
-async def main():
-    import readline
-    from session import SessionLogger, load_session
-    import sys
-    from datetime import datetime
+        Args:
+            content_msg_id: The message_id to find references to
 
-    # Check for --resume flag
-    if "--resume" in sys.argv:
-        idx = sys.argv.index("--resume")
-        session_file = sys.argv[idx + 1]
-        a = load_session(session_file)
-        print(f"Session resumed from {session_file}")
-    else:
-        a = Agent()
-        session_file = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-
-        # Log root agent creation (no cause for root agent)
-        logger = SessionLogger(session_file)
-        logger.log_agent_created(
-            agent_id=a.agent_id,
-            language_model=a.language_model
-        )
-
-    # Attach logger to agent tree (or reattach for resumed sessions)
-    if not hasattr(a, 'logger'):
-        logger = SessionLogger(session_file)
-
-    def attach_logger(agent):
-        agent.logger = logger
-        for subagent in agent.subagents.values():
-            attach_logger(subagent)
-    attach_logger(a)
-
-    # Note: Subagent creation will be logged by the parent agent when it calls
-    # the task tool. The tool implementation should call logger.log_agent_created
-    # with the appropriate cause (the message_id of the tool call that created it).
-
-    while True:
-        prompt = input("> ")
-
-        # Agent logs its own transcript_entry
-        a.harken(prompt)
-
-        # Agent generates response (logs its own transcript_entry)
-        await a.response()
-
-        # Display response
-        print(a.transcript[-1].get('content', ''))
-
-        # Session is automatically logged
+        Returns:
+            List of transcript_entry events referencing this content
+        """
 ```
 
 ## Justification: Why This Design Works
 
-### 1. Supports Session Resumption
+### 1. Session is Necessary for Correctness
+
+The Session class guarantees unique agent IDs across session resumptions:
+
+**Problem without Session:**
+- Agent IDs managed by `Agent._next_id` class variable
+- message IDs managed by separate SessionLogger
+- If session resumed incorrectly, agent_counter might not be restored
+- New agent could get same ID as terminated agent in log → ID collision
+
+**Solution with Session:**
+- Session owns both message_counter and agent_counter
+- Both restored atomically in `Session.load()`
+- Single restoration path - impossible to get out of sync
+- Agent registry tracks all agents (prevents collisions)
+
+### 2. Supports Session Resumption
 
 **Complete state reconstruction:**
 - `transcript_entry` events contain every message added to every transcript
-- Agent creation events track the agent tree structure
+- Agent creation events track the agent tree structure via explicit `cause` links
 - Replaying transcript_entry events rebuilds exact agent state
+- Session.load() restores all counters and metadata in single pass
 
 **Resume points:**
 - After each `Agent.response()` completes (before next user input)
 - No mid-tool-use resumption needed (avoids complexity)
 - Simple single-pass replay of transcript_entry events
-- Message counter restored from last message_id to avoid collisions
-- Agent._next_id restored to avoid agent ID collisions
 
-### 2. Substance and Causation
+### 3. Substance and Causation
 
 **The `substance` field:**
 - Identifies what content a message morally represents
@@ -932,13 +649,6 @@ async def main():
 - Can be a list for tool results that compile multiple messages
 - **Mutual exclusivity**: Events have either `substance` (same content as something else) OR `cause` (new content triggered by something), never both
 
-**The `piece_of_text` event:**
-- Stores text generated during tool operation but not in parent's transcript
-- Used for parent's broadcast messages (e.g., prompts sent to multiple participants)
-- Has `agent_id` field identifying which agent created this text
-- Has `cause` field linking to the tool call that created it
-- NOT used for formatted utterances - those use `substance` to point to original
-
 **Hook transparency example:**
 ```
 msg_001: transcript_entry (Jack says "password: 1234")
@@ -946,7 +656,7 @@ msg_002: transcript_entry (Jill hears "password: [REDACTED]", substance=msg_001)
 ```
 Hook intervention visible by comparing msg_001 content (original) vs msg_002 content (what Jill received). Both have the same substance, showing they morally represent the same message.
 
-### 3. Enables Multi-Perspective Viewing
+### 4. Enables Multi-Perspective Viewing
 
 **Jack and Jill dialog:**
 - Collect transcript entries for selected agents (Jack, Jill)
@@ -964,80 +674,25 @@ Hook intervention visible by comparing msg_001 content (original) vs msg_002 con
 - See who heard what by checking which agents have transcript entries with substance pointing to the same message
 - No string matching needed - content identity is explicit
 
-### 4. Supports All Use Cases
+### 5. Agent Registry Enables Revivification
 
-**Debate (multiple perspectives):**
-- Multiple agents discuss same topic
-- Each agent's perspective visible in their transcript
-- Filter by agent set to see the debate
+The Session maintains a registry of all agents, enabling:
 
-**Multiple characters (selective info):**
-- Each character only receives messages sent to them
-- Information boundaries enforced by selective `harken()` calls
-- Character knowledge = their transcript contents
+**Revivification:**
+- Any agent can be reconstructed from event stream
+- Useful for agents that were terminated or evicted from memory
+- Session scans log for all transcript_entry events with matching agent_id
+- Rebuilds agent with full transcript restored
 
-**Event-driven agents:**
-- External triggers appear as user messages in agent transcripts
-- Fits naturally into message model
-- Async events logged when they occur
+**Memory management:**
+- Can evict agents from memory to save resources
+- Revivify on demand when needed
+- Supports long sessions with many transient agents
 
-**Resource constraints hook:**
-- Hook receives prompts asking for approval
-- Hook's reasoning visible in its transcript
-- Hook decisions tracked via tool results
-
-**Steel man reasoning:**
-- Hook detects disagreement (observes messages)
-- Hook sends reminder (message to main agent)
-- Main agent creates advocacy subagent (visible in transcript)
-
-**Long-term memory:**
-- Hook's transcript accumulates knowledge over time
-- Context injections are messages to main agent
-- Memory evolution visible in hook's transcript
-
-**Socratic teaching:**
-- Teacher and student are agents
-- Teacher's strategy visible in their transcript
-- Selective information sharing controls what student sees
-
-**Strategic thinking:**
-- Strategy agent and tactical agent communicate
-- Goal-setting messages in strategy agent's transcript
-- Tactical decisions influenced by strategy messages
-
-### 5. Simple Abstractions, Rich Capabilities
-
-**Core abstractions:**
-- **transcript_entry**: What's in an agent's transcript (thoughts, perceptions, actions)
-- **piece_of_text**: Intermediate text during tool operation (not in any agent's transcript)
-- **substance**: Links transcript entries to the content they represent
-- **cause**: Links new content to what triggered its creation
-- **Global ID space**: All events share the same ID namespace
-
-Everything maps to these primitives:
-- Agent creation → special event type
-- Utterances → transcript_entry with role=assistant, no tool_calls (no substance - original content)
-- Tool use → transcript_entry with role=assistant, has tool_calls
-- Parent's broadcast → piece_of_text (with cause), multiple transcript entries with substance pointing to it
-- Formatted utterance → transcript_entry with substance pointing to original (no piece_of_text)
-- External input → transcript_entry with role=user
-- Hook prompts → transcript_entry with role=user
-
-**Single event stream:**
-- No complex indexing required
-- Easy to append (performance)
-- Easy to query (filter by event_type, agent_id, role, etc.)
-- Relationships via explicit links (substance, cause, tool_call_id)
-- Message identity via substance (no string matching)
-
-**Minimal metadata:**
-- transcript_entry: event_type, agent_id, role, content, optional substance
-- piece_of_text: event_type, agent_id, content, cause (can be a list)
-- agent_created: event_type, agent_id, cause, name, language_model
-- Clean separation of concerns
-- Explicit relationships (no temporal inference needed)
-- **Mutual exclusivity**: substance OR cause, never both
+**State inspection:**
+- `list_agents()` shows all agents that exist/existed
+- Can query agent metadata without loading full state
+- Supports debugging and analysis
 
 ### 6. Tool Agnosticism
 
@@ -1048,139 +703,46 @@ Everything maps to these primitives:
 - No knowledge of discuss, broadcast, whisper, translation, or any tool specifics
 - Logging infrastructure never changes as new tools are added
 
-**How it works:**
-- Discuss tool: Creates piece_of_text for parent's prompts (with cause), delivers formatted utterances with substance pointing to original
-- Broadcast tool: Creates piece_of_text for parent's message, sends to all recipients with substance
-- Whisper tool: Direct delivery with substance pointing to original, no piece_of_text needed
-- Translation tool: Creates piece_of_text with translated content (cause = tool call), delivers with substance
-- Any future tool: Same pattern - create piece_of_text for parent-generated content, use substance to link
-
-**Viewer stays simple:**
-```python
-# This code never changes, regardless of tools used
-def extract_dialog(agent_ids):
-    entries = [e for e in events
-               if e["event_type"] == "transcript_entry"
-               and e["agent_id"] in agent_ids]
-
-    seen = set()
-    dialog = []
-    for entry in entries:
-        content_ref = entry.get("substance", entry["message_id"])
-        if content_ref not in seen:
-            seen.add(content_ref)
-            dialog.append(get_content(content_ref))
-
-    return dialog
-```
-
 The viewer doesn't need to know if a message was from discuss, broadcast, or any other tool. It just follows `substance` links.
 
-### 7. Viewer Flexibility
+### 7. Clean Responsibility Model
 
-**Unknown future analyses supported:**
-- Raw events available for any query
-- Filter by event_type, agent_id, role, etc.
-- Navigate relationships (substance, cause, tool_call_id)
-- Temporal ordering preserved
-- Can build new views without changing log format
+**Session responsibilities:**
+- Allocate unique IDs (messages and agents)
+- Log all events to event stream
+- Maintain agent registry
+- Revivify agents on demand
 
-**Examples of possible views:**
-- Timeline view (chronological events)
-- Agent tree view (hierarchical structure from agent_created events)
-- Dialog view (filter utterances by agent set)
-- Content flow diagram (visualize substance relationships)
-- Causality chain (follow substance/cause/tool_call_id links)
-- Agent perspective (show what an agent heard, thought, said from their transcript)
-- Information propagation (follow substance to see how utterances spread)
-- Hook intervention analysis (compare original content with received message content)
+**Agent responsibilities:**
+- Maintain transcript
+- Generate responses
+- Call session.log_transcript_entry() to log
 
-### 8. Clean Responsibility Model
-
-**Core agent method signatures:**
-- `Agent.harken(input)` - unchanged signature, extracts metadata from LoggedString
-- `Agent.response()` - returns LoggedString with message_id
-- `Agent.inform(dst, txt)` - passes LoggedString through, metadata travels invisibly
+**LoggedString responsibilities:**
+- Carry message_id metadata invisibly
+- Enable clean separation: operational code unaware of logging
 
 **Separation of concerns:**
-- **Substance is a logging concern**: During execution, content identity is implicit in the call stack
-- **LoggedString externalizes runtime semantics**: Converts implicit call stack information into explicit metadata
-- **Operational code stays clean**: No `substance` parameters polluting the APIs
-- **Logging code extracts metadata**: `getattr(input, 'message_id', None)` at logging boundaries
-
-**Why LoggedString instead of parameters:**
-```python
-# Without LoggedString (logging pollutes operational code):
-def harken(self, input, substance=None):  # Logging concern in signature
-    ...
-
-# With LoggedString (clean separation):
-def harken(self, input):  # Pure operational signature
-    substance = getattr(input, 'message_id', None)  # Logging extraction
-    ...
-```
-
-**Key benefit:** The agent's operational logic is completely independent of logging. Logging metadata travels invisibly with strings, extracted only at logging boundaries.
-
-## Practical Considerations
-
-### Concurrency
-Single-threaded with asyncio. No concurrency concerns, no need for locks or atomic operations.
-
-### Scale
-This is for single chat sessions (research platform), not long-running production systems:
-- No log rotation needed
-- Loading entire session into memory is acceptable
-- Typical sessions: hundreds to thousands of messages
-
-### Performance
-Append-only writes are fast. Simple JSONL format is:
-- Easy to debug (human-readable)
-- Easy to process (one event per line)
-- Compatible with standard tools (jq, grep, etc.)
+- Operational code: `harken(input)` - clean signature, no logging parameters
+- Logging code: `getattr(input, 'message_id', None)` - extracts metadata at boundaries
+- Session manages all state and logging
+- Agents focus on LLM interaction
 
 ## Summary
 
-This logging architecture achieves completeness (can resume sessions), flexibility (supports unknown future analyses), simplicity (minimal event types), transparency (hook interventions visible), tool agnosticism (viewer never parses tool arguments), and **clean separation of concerns** (logging doesn't pollute operational code).
+This logging architecture achieves:
+- **Correctness**: Session guarantees unique IDs across resumptions
+- **Completeness**: Can resume sessions with full state
+- **Flexibility**: Supports unknown future analyses
+- **Simplicity**: Minimal event types (transcript_entry, piece_of_text, agent_created)
+- **Transparency**: Hook interventions visible via substance links
+- **Tool agnosticism**: Viewer never parses tool arguments
+- **Clean separation**: Logging doesn't pollute operational code
 
 **Key insights:**
-1. **Transcripts are the state** - Agent state captured entirely in transcript_entry events
-2. **Substance is a logging concern** - During execution, content identity is implicit in the call stack; logging externalizes it
-3. **LoggedString separates concerns** - Logging metadata travels invisibly with strings, extracted at boundaries
-4. **Message identity is explicit** - `substance` makes it clear when multiple transcript entries represent the same content
-5. **Tool agnostic** - Viewer groups by `substance`, never needs tool-specific knowledge
-6. **Hook transparency** - Comparing original content with received content reveals modifications
-7. **Clean APIs** - `harken(input)` signature unchanged; no logging parameters in operational code
-8. **Substance vs cause** - Clear distinction between same content (substance) and triggered content (cause)
-
-This design uses minimal abstractions while supporting all use cases: multi-agent discussions, inner monologue, hooks, external events, information flow analysis, and unknown future cognitive tools. The viewer remains simple and unchanged as new communication patterns emerge.
-
-**Why it works:**
-- **transcript_entry**: What's in an agent's transcript
-- **piece_of_text**: Intermediate text during tool operation (not in parent's transcript)
-- **LoggedString**: String subclass carrying message_id invisibly
-- **substance**: Links transcript entries to the content they represent, enables deduplication
-- **cause**: Links new content to what triggered its creation
-- Operational code: `harken(input)` - clean, no logging concerns
-- Logging code: `getattr(input, 'message_id', None)` - extracts metadata at boundaries, uses as substance
-- Viewer extracts conversations by grouping on `substance` - no string matching
-- All information needed for analysis is in the event log
-- **Mutual exclusivity**: Events have substance OR cause, never both
-
-**Key benefit of LoggedString:**
-The system's operational logic knows content identity implicitly through the call stack. LoggedString externalizes this runtime information for logging without polluting the APIs. Compare:
-
-```python
-# Without LoggedString (logging pollutes operational code):
-utterance_msg_id = await jack.response()
-jill.harken(msg, substance=utterance_msg_id)  # Logging concern
-
-# With LoggedString (clean separation):
-utterance = await jack.response()  # Returns LoggedString with message_id
-jill.harken(msg)  # Pure operational call; metadata travels invisibly
-```
-
-**Key benefit of piece_of_text:**
-When the discuss tool sends "You meet in a cafe" to both Jack and Jill, there's one piece_of_text event (with `cause`) and two transcript_entry events (both with substance pointing to it). The viewer knows these are the same message without parsing the discuss tool's arguments or comparing strings. This pattern works for any tool that broadcasts messages.
-
-This makes the system more transparent, easier to implement, tool-agnostic, reveals emergent phenomena like hook modifications, and maintains clean separation between operational logic and logging concerns.
+1. **Session is necessary** - Not just convenient, but required for correctness
+2. **Transcripts are the state** - Agent state captured entirely in transcript_entry events
+3. **LoggedString separates concerns** - Logging metadata travels invisibly
+4. **substance vs cause** - Clear distinction between same content and triggered content
+5. **Mutual exclusivity** - Events have substance OR cause, never both
+6. **Registry enables revivification** - Any agent can be reconstructed on demand
