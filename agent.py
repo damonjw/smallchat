@@ -41,12 +41,12 @@ class Agent:
         self.world = World([self.task, self.discuss])
         self.subagents = {}
 
-    def pleasenote(self, input):
+    def harken(self, input):
         assert isinstance(input, str), "Expected a string input"
         self.transcript.append({'role':'user', 'content':input})
 
     async def response(self, input=None):
-        if input is not None: self.pleasenote(input)
+        if input is not None: self.harken(input)
         # TODO: check if the LLM can accept a transcript that doesn't end in a 'user' message.
         # Can it end in a system message? Can I put in an empty user message?
         assert len(self.transcript) > 0 and self.transcript[-1]['role'] == 'user'
@@ -118,7 +118,7 @@ class Agent:
         if prompt is not None:
             print("->", prompt)
             for s in self.speakers + self.listeners:
-                self.subagents[s].pleasenote(prompt)
+                self.subagents[s].harken(prompt)
         # A round of discussion
         if len(self.speakers) == 1 and len(self.listeners) == 0:
             a = self.subagents[self.speakers[0]]
@@ -134,7 +134,7 @@ class Agent:
                 print("<-", msg)
                 for t in self.speakers + self.listeners:
                     if t == s: continue
-                    self.subagents[t].pleasenote(msg)
+                    self.subagents[t].harken(msg)
                 res.append(msg)
             return '\n\n'.join(res)
 

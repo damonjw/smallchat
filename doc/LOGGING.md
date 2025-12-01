@@ -79,7 +79,7 @@ The `content_id` link shows that Jill's message represents Jack's original utter
 
 **Agents log their own transcript entries:**
 - `Agent.response()` logs assistant messages and returns a `MessageString` with `content_id`
-- `Agent.pleasenote(input)` logs user messages, extracting `content_id` from the input if present
+- `Agent.harken(input)` logs user messages, extracting `content_id` from the input if present
 
 **MessageString - logging metadata carrier:**
 - A string subclass that carries logging metadata without changing operational APIs
@@ -348,14 +348,14 @@ msg = MessageString(
 **Received message:**
 ```python
 # Deliver to recipient
-recipient.pleasenote(msg)
-# pleasenote() extracts msg.content_id and logs it
+recipient.harken(msg)
+# harken() extracts msg.content_id and logs it
 ```
 
 ### Benefits
 
 1. **Clean separation:** Operational code works with strings; logging extracts metadata
-2. **No API changes:** `pleasenote(self, input)` signature unchanged
+2. **No API changes:** `harken(self, input)` signature unchanged
 3. **Implicit metadata:** Logging information travels with the string invisibly
 4. **Type compatibility:** MessageString is a string subclass, works anywhere strings work
 5. **Semantic clarity:** content_id represents "what content" not "where from"
@@ -377,13 +377,13 @@ class Agent:
 ```
 
 **Logging responsibility principle:**
-- **Agents log their own transcript entries**: `pleasenote()` and `response()` log what enters the agent's transcript
+- **Agents log their own transcript entries**: `harken()` and `response()` log what enters the agent's transcript
 - **MessageString carries metadata**: Logging metadata travels invisibly with strings
 - **Clean separation**: Operational code unaware of logging; logging code extracts metadata
 
 **Add logging methods:**
 ```python
-def pleasenote(self, input):
+def harken(self, input):
     """Add a user message to transcript.
 
     Args:
@@ -429,7 +429,7 @@ def inform(self, dst, txt):
         txt: The text message to send (may be MessageString with metadata)
     """
     # Deliver the message (metadata travels with it)
-    dst.pleasenote(txt)
+    dst.harken(txt)
 ```
 
 ### 2. Discuss Tool (`agent.py`)
@@ -881,7 +881,7 @@ async def main():
         prompt = input("> ")
 
         # Agent logs its own transcript_entry
-        a.pleasenote(prompt)
+        a.harken(prompt)
 
         # Agent generates response (logs its own transcript_entry)
         await a.response()
@@ -957,7 +957,7 @@ Hook intervention visible by comparing msg_001 content (original) vs msg_002 con
 
 **Multiple characters (selective info):**
 - Each character only receives messages sent to them
-- Information boundaries enforced by selective `pleasenote()` calls
+- Information boundaries enforced by selective `harken()` calls
 - Character knowledge = their transcript contents
 
 **Event-driven agents:**
@@ -1080,7 +1080,7 @@ The viewer doesn't need to know if a message was from discuss, broadcast, or any
 ### 8. Clean Responsibility Model
 
 **Core agent method signatures:**
-- `Agent.pleasenote(input)` - unchanged signature, extracts metadata from MessageString
+- `Agent.harken(input)` - unchanged signature, extracts metadata from MessageString
 - `Agent.response()` - returns MessageString with content_id
 - `Agent.inform(dst, txt)` - passes MessageString through, metadata travels invisibly
 
@@ -1093,11 +1093,11 @@ The viewer doesn't need to know if a message was from discuss, broadcast, or any
 **Why MessageString instead of parameters:**
 ```python
 # Without MessageString (logging pollutes operational code):
-def pleasenote(self, input, content_id=None):  # Logging concern in signature
+def harken(self, input, content_id=None):  # Logging concern in signature
     ...
 
 # With MessageString (clean separation):
-def pleasenote(self, input):  # Pure operational signature
+def harken(self, input):  # Pure operational signature
     content_id = getattr(input, 'content_id', None)  # Logging extraction
     ...
 ```
@@ -1132,7 +1132,7 @@ This logging architecture achieves completeness (can resume sessions), flexibili
 4. **Message identity is explicit** - `content_id` makes it clear when multiple transcript entries represent the same content
 5. **Tool agnostic** - Viewer groups by `content_id`, never needs tool-specific knowledge
 6. **Hook transparency** - Comparing original content with received content reveals modifications
-7. **Clean APIs** - `pleasenote(input)` signature unchanged; no logging parameters in operational code
+7. **Clean APIs** - `harken(input)` signature unchanged; no logging parameters in operational code
 
 This design uses minimal abstractions while supporting all use cases: multi-agent discussions, inner monologue, hooks, external events, information flow analysis, and unknown future cognitive tools. The viewer remains simple and unchanged as new communication patterns emerge.
 
@@ -1142,7 +1142,7 @@ This design uses minimal abstractions while supporting all use cases: multi-agen
 - **MessageString**: String subclass carrying logging metadata invisibly
 - **content_id**: Links transcript entries to the content they represent, enables deduplication
 - **caused_by**: Links piece_of_text to the tool call that created it
-- Operational code: `pleasenote(input)` - clean, no logging concerns
+- Operational code: `harken(input)` - clean, no logging concerns
 - Logging code: `getattr(input, 'content_id', None)` - extracts metadata at boundaries
 - Viewer extracts conversations by grouping on `content_id` - no string matching
 - All information needed for analysis is in the event log
@@ -1153,11 +1153,11 @@ The system's operational logic knows content identity implicitly through the cal
 ```python
 # Without MessageString (logging pollutes operational code):
 utterance_msg_id = await jack.response()
-jill.pleasenote(msg, content_id=utterance_msg_id)  # Logging concern
+jill.harken(msg, content_id=utterance_msg_id)  # Logging concern
 
 # With MessageString (clean separation):
 utterance = await jack.response()  # Returns MessageString with content_id
-jill.pleasenote(msg)  # Pure operational call; metadata travels invisibly
+jill.harken(msg)  # Pure operational call; metadata travels invisibly
 ```
 
 **Key benefit of piece_of_text:**
