@@ -41,16 +41,15 @@ class Agent:
         self.world = World([self.task, self.discuss])
         self.subagents = {}
 
-    def inform(self, input):
+    def pleasenote(self, input):
         assert isinstance(input, str), "Expected a string input"
         self.transcript.append({'role':'user', 'content':input})
 
     async def response(self, input=None):
-        if input is None:
-            assert len(self.transcript) > 0 and self.transcript[-1]['role'] == 'user'
-        else:
-            assert isinstance(input, str), "Expected a string input"
-            self.transcript.append({'role':'user', 'content':input})
+        if input is not None: self.pleasenote(input)
+        # TODO: check if the LLM can accept a transcript that doesn't end in a 'user' message.
+        # Can it end in a system message? Can I put in an empty user message?
+        assert len(self.transcript) > 0 and self.transcript[-1]['role'] == 'user'
         while True:
             res = await try_repeatedly(spinner(litellm.acompletion(model=self.language_model, messages=self.transcript, tools=self.world.tools)))
             res = res.choices[0].message
@@ -119,7 +118,7 @@ class Agent:
         if prompt is not None:
             print("->", prompt)
             for s in self.speakers + self.listeners:
-                self.subagents[s].inform(prompt)
+                self.subagents[s].pleasenote(prompt)
         # A round of discussion
         if len(self.speakers) == 1 and len(self.listeners) == 0:
             a = self.subagents[self.speakers[0]]
@@ -135,7 +134,7 @@ class Agent:
                 print("<-", msg)
                 for t in self.speakers + self.listeners:
                     if t == s: continue
-                    self.subagents[t].inform(msg)
+                    self.subagents[t].pleasenote(msg)
                 res.append(msg)
             return '\n\n'.join(res)
 
