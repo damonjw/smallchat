@@ -22,7 +22,7 @@ This document describes the logging architecture for session persistence and mul
 Each agent has:
 - **Unique ID**: `agent_001`, `agent_002`, etc.
 - **Transcript**: Ordered list of messages
-- **Parent relationship**: Inferred from temporal ordering (agent creation event appears between parent's tool call and tool result, with matching name)
+- **Parent relationship**: Explicit via `cause` field in agent_created event (points to the tool call that created this agent)
 - **Metadata**: `language_model`, creation context
 
 ### 2. Events
@@ -40,19 +40,20 @@ Each transcript entry has:
 - **Identity**: `message_id` (globally unique)
 - **Agent**: `agent_id` (whose transcript this appears in)
 - **Content**: `role`, `content`, `tool_calls`, etc.
-- **Content identity**: `content_id` (optional) - what content does this morally represent?
+- **Substance**: `substance` (optional) - what content does this morally represent?
 
 #### Pieces of Text
 Intermediate text generated during tool operation but not part of the parent agent's transcript. Used when a tool generates text that will be delivered to other agents.
 
-**Purpose**: Enables deduplication and tool-agnostic viewing. When the same text is delivered to multiple agents, it's stored once as a `piece_of_text`, and each recipient's transcript entry points to it via `content_id`.
+**Purpose**: Enables deduplication and tool-agnostic viewing. When the same text is delivered to multiple agents, it's stored once as a `piece_of_text`, and each recipient's transcript entry points to it via `substance`.
 
 Each piece of text has:
 - **Identity**: `message_id` (globally unique)
+- **Agent**: `agent_id` (which agent created this text)
 - **Content**: `content` (the text itself)
-- **Generation tracking**: `caused_by` (typically points to the tool call that generated it)
+- **Causation**: `cause` (points to the tool call that generated it)
 
-**Key distinction**: A `piece_of_text` is NOT added to any agent's transcript. It's an intermediate artifact that will be delivered to agents, who log their own transcript entries with `content_id` pointing to the piece of text.
+**Key distinction**: A `piece_of_text` is NOT added to any agent's transcript. It's an intermediate artifact that will be delivered to agents, who log their own transcript entries with `substance` pointing to the piece of text.
 
 ### 3. Global ID Space
 
@@ -66,63 +67,65 @@ An **utterance** is a transcript entry with role=assistant that has `content` bu
 
 When utterances are communicated to other agents:
 1. The original utterance is a transcript entry in the speaker's transcript
-2. The recipient receives a (possibly formatted) version with `content_id` pointing to the original utterance
+2. The recipient receives a (possibly formatted) version with `substance` pointing to the original utterance
 3. Hook modifications are visible by comparing the original content with what was received
 
 **Example**: Jack says "Hello" to Jill (direct):
 1. `msg_001`: transcript_entry (Jack's assistant message: "Hello")
-2. `msg_002`: transcript_entry (Jill's user message: "[Jack]: Hello", content_id=msg_001)
+2. `msg_002`: transcript_entry (Jill's user message: "[Jack]: Hello", substance=msg_001)
 
-The `content_id` link shows that Jill's message represents Jack's original utterance, even though the string is formatted differently.
+The `substance` link shows that Jill's message represents Jack's original utterance, even though the string is formatted differently.
 
 ### 5. Responsibility Model
 
 **Agents log their own transcript entries:**
-- `Agent.response()` logs assistant messages and returns a `MessageString` with `content_id`
-- `Agent.harken(input)` logs user messages, extracting `content_id` from the input if present
+- `Agent.response()` logs assistant messages and returns a `LoggedString` with its `message_id`
+- `Agent.harken(input)` logs user messages, extracting `message_id` from the input if present (used as `substance`)
 
-**MessageString - logging metadata carrier:**
-- A string subclass that carries logging metadata without changing operational APIs
-- Has `content_id` attribute (what content does this morally represent?)
-  - For originals: their own message_id in the log
+**LoggedString - logging metadata carrier:**
+- A string subclass that carries its message_id without changing operational APIs
+- Has `message_id` attribute identifying the substance of this content
+  - For originals: their own message_id from the log
   - For formatted versions: the original content's message_id
-- Has `caused_by` attribute (only for piece_of_text - which tool call created this)
 - Operational code treats it as a regular string
-- Logging code extracts metadata via `getattr(input, 'content_id', None)`
+- Logging code extracts metadata via `getattr(input, 'message_id', None)`
 
-**Content identity tracking:**
-- When an agent delivers a formatted message, the `content_id` points to the original content
-- This enables viewer to deduplicate without string matching
-- Example: Jack's utterance (msg_001) → formatted as "[Jack]: Hello" with content_id=msg_001 → Jill's receipt (msg_003, content_id=msg_001)
+**Substance tracking:**
+- When an agent delivers a formatted message, the LoggedString's `message_id` points to the original content
+- This becomes the `substance` field when logging the recipient's transcript entry
+- Example: Jack's utterance (msg_001) → formatted as "[Jack]: Hello" with message_id=msg_001 → Jill's receipt (msg_003, substance=msg_001)
 
-### 6. Causality and Content Identity
+### 6. Causality and Substance Identity
 
-The log records objective facts about what happened. Causal relationships are captured through explicit links and temporal ordering:
+The log records objective facts about what happened. Relationships are captured through explicit links and temporal ordering:
 
 **Transcript entries**:
 - Each entry records what enters an agent's transcript
-- `content_id` field (optional) identifies what content this morally represents
-  - If omitted, the entry represents itself (content_id = message_id implicitly)
+- `substance` field (optional) identifies what content this morally represents
+  - If omitted, the entry represents itself (new, original content)
   - If present, points to the original content this is based on
 - Tool results have `tool_call_id` linking to originating tool call
 - Temporal ordering shows when events occurred
 
 **Pieces of text**:
-- `caused_by` field links to the tool call that created this text
+- `cause` field links to the tool call that created this text
+- `agent_id` field identifies which agent created this text
 - Represents intermediate content during tool operation
+- **Note**: piece_of_text events have `cause`, not `substance` (they are new content caused by a tool call)
+- **Note**: `cause` can be a list to allow for tool results that compile multiple messages
 
 **Agent creation events**:
-- Temporal ordering places creation between parent's tool call and tool result
-- The `name` field matches the tool call arguments
-- Viewer parses tool call arguments to match creation events with originating tool calls
+- `cause` field explicitly links to the tool call that created this agent
+- No need for temporal inference or name matching
+- Makes parent-child relationships explicit and unambiguous
 
 **Information flow example:**
 ```
 msg_001: transcript_entry (Jack: "Hello")                    [Jack's assistant message]
-msg_002: transcript_entry (Jill: "[Jack]: Hello")           [Jill's user message, content_id=msg_001]
+msg_002: transcript_entry (Jill: "[Jack]: Hello")           [Jill's user message, substance=msg_001]
 ```
 
-The `content_id` link shows that Jill's message represents the same content as Jack's utterance (morally the same, though string is formatted). Hook interventions are visible by comparing content: msg_001 vs msg_002.
+The `substance` link shows that Jill's message represents the same content as Jack's utterance (morally the same, though string is formatted). Hook interventions are visible by comparing content: msg_001 vs msg_002.
 
 ## Log Format
 
@@ -153,14 +156,14 @@ Append-only JSONL file where each line is an event:
 }
 ```
 
-**Content identity (optional):**
+**Substance (optional):**
 ```json
 {
-  "content_id": "msg_100"  // Points to the content this morally represents
+  "substance": "msg_100"  // Points to the content this morally represents
 }
 ```
 
-**When to include**: Add `content_id` when this entry represents content from another message (e.g., formatted version of an utterance). If omitted, the entry represents itself.
+**When to include**: Add `substance` when this entry represents content from another message (e.g., formatted version of an utterance). If omitted, the entry represents itself (new, original content).
 
 **Tool calls (for role=assistant):**
 ```json
@@ -190,20 +193,19 @@ Append-only JSONL file where each line is an event:
 {
   "message_id": "msg_124",
   "event_type": "piece_of_text",
-  "content": "You meet in a cafe. Introduce yourselves."
+  "agent_id": "agent_001",
+  "content": "You meet in a cafe. Introduce yourselves.",
+  "cause": "msg_123"
 }
 ```
 
-**Generation tracking (typically present):**
-```json
-{
-  "caused_by": "msg_123"  // Points to the tool call that generated this text
-}
-```
+**Fields:**
+- `agent_id`: Which agent created this text
+- `cause`: Points to the tool call that generated this text (can be a list for tool results compiling multiple messages)
 
-**When to use**: Create a `piece_of_text` when a tool generates text that will be delivered to multiple agents (e.g., broadcast prompt from parent). The same `piece_of_text` can be referenced by multiple transcript entries via their `content_id` field.
+**When to use**: Create a `piece_of_text` when a tool generates text that will be delivered to multiple agents (e.g., broadcast prompt from parent). The same `piece_of_text` can be referenced by multiple transcript entries via their `substance` field.
 
-**Note**: For formatted utterances (e.g., "[Jack]: Hello"), do NOT create a piece_of_text. Instead, deliver the formatted message with `content_id` pointing to the original utterance. Only create piece_of_text for content generated by the parent agent.
+**Note**: For formatted utterances (e.g., "[Jack]: Hello"), do NOT create a piece_of_text. Instead, deliver the formatted message with `substance` pointing to the original utterance. Only create piece_of_text for content generated by the parent agent.
 
 #### Agent Creation Event
 
@@ -212,12 +214,18 @@ Append-only JSONL file where each line is an event:
   "message_id": "msg_004",
   "event_type": "agent_created",
   "agent_id": "agent_002",
+  "cause": "msg_003",
   "name": "Jack",
   "language_model": "anthropic/claude-sonnet-4-5-20250929"
 }
 ```
 
-The parent agent is inferred from temporal ordering: the creation event appears between the parent's tool call (to the `task` function) and the corresponding tool result. The `name` field matches the name in the tool call arguments, allowing the viewer to link creation events to their originating tool calls when multiple agents are created concurrently.
+**Fields:**
+- `cause`: Points to the tool call message that created this agent (explicit parent-child relationship). Omitted for root agent.
+- `name`: Optional human-readable name for the agent
+- `language_model`: The model used by this agent
+
+This explicit relationship avoids the need for temporal inference or name matching. The root agent will not have a cause field.
 
 ## Concrete Examples
 
@@ -227,49 +235,49 @@ The parent agent is inferred from temporal ordering: the creation event appears 
 {"message_id": "msg_001", "event_type": "agent_created", "agent_id": "agent_root", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
 {"message_id": "msg_002", "event_type": "transcript_entry", "agent_id": "agent_root", "role": "user", "content": "Create Jack and Jill for a cafe discussion"}
 {"message_id": "msg_003", "event_type": "transcript_entry", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "task", "arguments": "{\"name\": \"Jack\", \"system_prompt\": \"You work in HR...\"}"}}]}
-{"message_id": "msg_004", "event_type": "agent_created", "agent_id": "agent_jack", "name": "Jack", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
+{"message_id": "msg_004", "event_type": "agent_created", "agent_id": "agent_jack", "cause": "msg_003", "name": "Jack", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
 {"message_id": "msg_005", "event_type": "transcript_entry", "agent_id": "agent_jack", "role": "system", "content": "You work in HR..."}
 {"message_id": "msg_006", "event_type": "transcript_entry", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c1", "content": "Created subagent: Jack"}
 {"message_id": "msg_007", "event_type": "transcript_entry", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c2", "function": {"name": "task", "arguments": "{\"name\": \"Jill\", \"system_prompt\": \"You are an aspiring author...\"}"}}]}
-{"message_id": "msg_008", "event_type": "agent_created", "agent_id": "agent_jill", "name": "Jill", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
+{"message_id": "msg_008", "event_type": "agent_created", "agent_id": "agent_jill", "cause": "msg_007", "name": "Jill", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
 {"message_id": "msg_009", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "system", "content": "You are an aspiring author..."}
 {"message_id": "msg_010", "event_type": "transcript_entry", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c2", "content": "Created subagent: Jill"}
 {"message_id": "msg_011", "event_type": "transcript_entry", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c3", "function": {"name": "discuss", "arguments": "{\"prompt\": \"You meet in a cafe. Introduce yourselves.\", \"speakers\": [\"Jack\", \"Jill\"]}"}}]}
-{"message_id": "msg_012", "event_type": "piece_of_text", "content": "You meet in a cafe. Introduce yourselves.", "caused_by": "msg_011"}
-{"message_id": "msg_013", "event_type": "transcript_entry", "agent_id": "agent_jack", "role": "user", "content": "You meet in a cafe. Introduce yourselves.", "content_id": "msg_012"}
-{"message_id": "msg_014", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "user", "content": "You meet in a cafe. Introduce yourselves.", "content_id": "msg_012"}
+{"message_id": "msg_012", "event_type": "piece_of_text", "agent_id": "agent_root", "content": "You meet in a cafe. Introduce yourselves.", "cause": "msg_011"}
+{"message_id": "msg_013", "event_type": "transcript_entry", "agent_id": "agent_jack", "role": "user", "content": "You meet in a cafe. Introduce yourselves.", "substance": "msg_012"}
+{"message_id": "msg_014", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "user", "content": "You meet in a cafe. Introduce yourselves.", "substance": "msg_012"}
 {"message_id": "msg_015", "event_type": "transcript_entry", "agent_id": "agent_jack", "role": "assistant", "content": "Hi, I'm Jack. *extends hand*"}
 {"message_id": "msg_016", "event_type": "transcript_entry", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c3", "content": "Hi, I'm Jack. *extends hand*"}
-{"message_id": "msg_017", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "user", "content": "[Jack]: Hi, I'm Jack. *extends hand*", "content_id": "msg_015"}
+{"message_id": "msg_017", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "user", "content": "[Jack]: Hi, I'm Jack. *extends hand*", "substance": "msg_015"}
 {"message_id": "msg_018", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "assistant", "content": "*smiles* Hello Jack, I'm Jill."}
 {"message_id": "msg_019", "event_type": "transcript_entry", "agent_id": "agent_root", "role": "tool", "tool_call_id": "c3", "content": "*smiles* Hello Jack, I'm Jill."}
-{"message_id": "msg_020", "event_type": "transcript_entry", "agent_id": "agent_jack", "role": "user", "content": "[Jill]: *smiles* Hello Jack, I'm Jill.", "content_id": "msg_018"}
+{"message_id": "msg_020", "event_type": "transcript_entry", "agent_id": "agent_jack", "role": "user", "content": "[Jill]: *smiles* Hello Jack, I'm Jill.", "substance": "msg_018"}
 ```
 
-Note: The initial prompt (msg_012) is a `piece_of_text` created by the discuss tool. Both Jack and Jill receive it (msg_013, msg_014 both have content_id=msg_012). When Jack speaks (msg_015), his utterance is formatted as "[Jack]: ..." and delivered to Jill (msg_017) with content_id=msg_015. No piece_of_text is created for the formatted utterance - it's just a formatted version of the original, so content_id points directly to Jack's utterance.
+Note: The initial prompt (msg_012) is a `piece_of_text` created by the discuss tool (with `cause`=msg_011). Both Jack and Jill receive it (msg_013, msg_014 both have substance=msg_012). When Jack speaks (msg_015), his utterance is formatted as "[Jack]: ..." and delivered to Jill (msg_017) with substance=msg_015. No piece_of_text is created for the formatted utterance - it's just a formatted version of the original, so substance points directly to Jack's utterance.
 
 ### Example 2: Inner Monologue
 
 ```jsonl
 {"message_id": "msg_030", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "assistant", "tool_calls": [{"id": "c4", "function": {"name": "task", "arguments": "{\"name\": \"Inner\", \"system_prompt\": \"You are Jill's inner voice...\"}"}}]}
-{"message_id": "msg_031", "event_type": "agent_created", "agent_id": "agent_jill_inner", "name": "Inner", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
+{"message_id": "msg_031", "event_type": "agent_created", "agent_id": "agent_jill_inner", "cause": "msg_030", "name": "Inner", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
 {"message_id": "msg_032", "event_type": "transcript_entry", "agent_id": "agent_jill_inner", "role": "system", "content": "You are Jill's inner voice..."}
-{"message_id": "msg_033", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "user", "content": "[Jack]: Hi, I'm Jack. *extends hand*", "content_id": "msg_015"}
+{"message_id": "msg_033", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "user", "content": "[Jack]: Hi, I'm Jack. *extends hand*", "substance": "msg_015"}
 {"message_id": "msg_034", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "assistant", "tool_calls": [{"id": "c5", "function": {"name": "discuss", "arguments": "{\"speakers\": [\"Inner\"], \"prompt\": \"Jack just introduced himself. What should I say?\"}"}}]}
-{"message_id": "msg_035", "event_type": "piece_of_text", "content": "Jack just introduced himself. What should I say?", "caused_by": "msg_034"}
-{"message_id": "msg_036", "event_type": "transcript_entry", "agent_id": "agent_jill_inner", "role": "user", "content": "Jack just introduced himself. What should I say?", "content_id": "msg_035"}
+{"message_id": "msg_035", "event_type": "piece_of_text", "agent_id": "agent_jill", "content": "Jack just introduced himself. What should I say?", "cause": "msg_034"}
+{"message_id": "msg_036", "event_type": "transcript_entry", "agent_id": "agent_jill_inner", "role": "user", "content": "Jack just introduced himself. What should I say?", "substance": "msg_035"}
 {"message_id": "msg_037", "event_type": "transcript_entry", "agent_id": "agent_jill_inner", "role": "assistant", "content": "Be friendly but not over-eager. A simple greeting with a smile."}
 {"message_id": "msg_038", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "tool", "tool_call_id": "c5", "content": "Be friendly but not over-eager. A simple greeting with a smile."}
 {"message_id": "msg_039", "event_type": "transcript_entry", "agent_id": "agent_jill", "role": "assistant", "content": "*smiles* Hello Jack, I'm Jill."}
 ```
 
-Note: Jill receives Jack's message (msg_033) with content_id pointing to Jack's original utterance (msg_015). Inner's response (msg_037) is only sent to Jill (msg_038), not to Jack. The selective information flow is evident from which agents' transcripts contain which messages.
+Note: Jill receives Jack's message (msg_033) with substance pointing to Jack's original utterance (msg_015). Inner's response (msg_037) is only sent to Jill (msg_038), not to Jack. The selective information flow is evident from which agents' transcripts contain which messages.
 
 ### Example 3: Hook Intervention (Resource Constraints)
 
 ```jsonl
 {"message_id": "msg_100", "event_type": "transcript_entry", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c9", "function": {"name": "task", "arguments": "{\"name\": \"ResourceMonitor\", \"system_prompt\": \"Monitor resource usage...\"}"}}]}
-{"message_id": "msg_101", "event_type": "agent_created", "agent_id": "agent_resource_hook", "name": "ResourceMonitor", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
+{"message_id": "msg_101", "event_type": "agent_created", "agent_id": "agent_resource_hook", "cause": "msg_100", "name": "ResourceMonitor", "language_model": "anthropic/claude-sonnet-4-5-20250929"}
 {"message_id": "msg_102", "event_type": "transcript_entry", "agent_id": "agent_root", "role": "assistant", "tool_calls": [{"id": "c10", "function": {"name": "task", "arguments": "{\"name\": \"Searcher4\"}"}}]}
 {"message_id": "msg_103", "event_type": "transcript_entry", "agent_id": "agent_resource_hook", "role": "user", "content": "Agent 'agent_root' is attempting to create subagent 'Searcher4'. Current subagent count: 3. Approve?"}
 {"message_id": "msg_104", "event_type": "transcript_entry", "agent_id": "agent_resource_hook", "role": "assistant", "content": "DENY. Maximum subagents (3) already reached."}
@@ -287,69 +295,74 @@ Note: The hook agent receives a prompt (msg_103) asking for approval, responds w
 
 Note: External events appear as user messages in the agent's transcript, fitting naturally into the same model as agent-to-agent communication.
 
-## MessageString: Separating Operational and Logging Concerns
+## LoggedString: Separating Operational and Logging Concerns
 
 ### Design Philosophy
 
-**The problem:** Content identity is purely a logging concern. During execution, the system knows what content messages represent implicitly through the call stack. Adding metadata parameters throughout the code pollutes operational logic with logging concerns.
+**The problem:** Content identity (substance) is purely a logging concern. During execution, the system knows what content messages represent implicitly through the call stack. Adding metadata parameters throughout the code pollutes operational logic with logging concerns.
 
-**The solution:** Use a string subclass that carries logging metadata invisibly:
+**The solution:** Use a string subclass that carries its message_id invisibly:
 
 ```python
-class MessageString(str):
-    """A string with optional logging metadata.
+class LoggedString(str):
+    """A string with its message_id for logging.
 
     During execution, content identity is implicit in the call stack. This class
     externalizes that runtime information for logging without changing APIs.
 
     Args:
         content: The string content
-        content_id: What content does this morally represent?
+        message_id: The message_id identifying the substance of this content
             - For originals: their own message_id in the log
             - For formatted versions: the original content's message_id
-        caused_by: Only for piece_of_text - which tool call created this
     """
-    def __new__(cls, content, content_id=None, caused_by=None):
+    def __new__(cls, content, message_id=None):
         instance = super().__new__(cls, content)
-        instance.content_id = content_id
-        instance.caused_by = caused_by
+        instance.message_id = message_id
         return instance
 ```
 
 ### Usage Patterns
 
-**Utterance (has content_id = its own ID, no caused_by):**
+**Utterance (original content):**
 ```python
 # Agent generates original utterance
 utterance = await agent.response()
-# Returns: MessageString("Hello", content_id="msg_015", caused_by=None)
+# Returns: LoggedString("Hello", message_id="msg_015")
+# When logged, this becomes a transcript_entry with message_id="msg_015" (no substance field)
 ```
 
-**piece_of_text (parent's broadcast - has content_id = its own ID, has caused_by):**
+**piece_of_text (parent's broadcast):**
 ```python
 # Parent creates broadcast prompt
 prompt_id = logger.log_piece_of_text(
+    agent_id=self.agent_id,
     content="Please introduce yourselves",
-    caused_by=tool_call_msg_id
+    cause=tool_call_msg_id
 )
-# Returns: MessageString("Please introduce yourselves", content_id="msg_012", caused_by="msg_011")
+# This logs: {message_id: "msg_012", event_type: "piece_of_text", agent_id: "agent_root", content: "...", cause: "msg_011"}
+# Returns: "msg_012"
+
+# Create LoggedString for delivery
+prompt_str = LoggedString("Please introduce yourselves", message_id=prompt_id)
 ```
 
-**Formatted utterance (has content_id = original, no caused_by):**
+**Formatted utterance (same substance as original):**
 ```python
 # Format Jack's utterance for delivery
-msg = MessageString(
+msg = LoggedString(
     f"[Jack]: {utterance}",
-    content_id=utterance.content_id  # Points to original utterance
+    message_id=utterance.message_id  # Points to original utterance
 )
-# The string is "[Jack]: Hello" but morally represents msg_015
+# The string is "[Jack]: Hello" but the message_id still points to msg_015
 ```
 
 **Received message:**
 ```python
 # Deliver to recipient
 recipient.harken(msg)
-# harken() extracts msg.content_id and logs it
+# harken() extracts msg.message_id and logs it as the substance field
+# Logs: {message_id: "msg_017", substance: "msg_015", ...}
 ```
 
 ### Benefits
@@ -357,8 +370,8 @@ recipient.harken(msg)
 1. **Clean separation:** Operational code works with strings; logging extracts metadata
 2. **No API changes:** `harken(self, input)` signature unchanged
 3. **Implicit metadata:** Logging information travels with the string invisibly
-4. **Type compatibility:** MessageString is a string subclass, works anywhere strings work
-5. **Semantic clarity:** content_id represents "what content" not "where from"
+4. **Type compatibility:** LoggedString is a string subclass, works anywhere strings work
+5. **Semantic clarity:** message_id represents the substance (what content this is)
 
 ## Code Modifications
 
@@ -378,7 +391,7 @@ class Agent:
 
 **Logging responsibility principle:**
 - **Agents log their own transcript entries**: `harken()` and `response()` log what enters the agent's transcript
-- **MessageString carries metadata**: Logging metadata travels invisibly with strings
+- **LoggedString carries metadata**: Logging metadata (message_id) travels invisibly with strings
 - **Clean separation**: Operational code unaware of logging; logging code extracts metadata
 
 **Add logging methods:**
@@ -387,7 +400,7 @@ def harken(self, input):
     """Add a user message to transcript.
 
     Args:
-        input: The message content (may be a MessageString with metadata)
+        input: The message content (may be a LoggedString with message_id)
     """
     # Operational: just use as string
     msg = {'role': 'user', 'content': str(input)}
@@ -395,11 +408,11 @@ def harken(self, input):
 
     # Logging: extract metadata if present
     if hasattr(self, 'logger'):
-        content_id = getattr(input, 'content_id', None)
+        substance = getattr(input, 'message_id', None)
         self.logger.log_transcript_entry(
             agent_id=self.agent_id,
             message=msg,
-            content_id=content_id
+            substance=substance
         )
 
 async def response(self):
@@ -417,16 +430,16 @@ async def response(self):
             message=res
         )
 
-    # Return MessageString with content_id pointing to itself (original)
+    # Return LoggedString with message_id pointing to itself (original)
     content = res.get('content', '')
-    return MessageString(content, content_id=msg_id, caused_by=None)
+    return LoggedString(content, message_id=msg_id)
 
 def inform(self, dst, txt):
     """Send a message from this agent to another agent.
 
     Args:
         dst: The destination Agent object
-        txt: The text message to send (may be MessageString with metadata)
+        txt: The text message to send (may be LoggedString with metadata)
     """
     # Deliver the message (metadata travels with it)
     dst.harken(txt)
@@ -434,7 +447,7 @@ def inform(self, dst, txt):
 
 ### 2. Discuss Tool (`agent.py`)
 
-**Add content identity tracking with piece_of_text and MessageString:**
+**Add substance tracking with piece_of_text and LoggedString:**
 ```python
 async def discuss(self, prompt=None, speakers=None, listeners=None):
     # Send prompt to all participants
@@ -447,12 +460,13 @@ async def discuss(self, prompt=None, speakers=None, listeners=None):
             tool_call_msg_id = self._find_msg_with_tool_call(tool_call_id)
 
             prompt_msg_id = self.logger.log_piece_of_text(
+                agent_id=self.agent_id,
                 content=prompt,
-                caused_by=tool_call_msg_id
+                cause=tool_call_msg_id
             )
 
-        # Create MessageString with content_id pointing to piece_of_text
-        prompt_str = MessageString(prompt, content_id=prompt_msg_id)
+        # Create LoggedString with message_id pointing to piece_of_text
+        prompt_str = LoggedString(prompt, message_id=prompt_msg_id)
 
         # Deliver to all participants
         for s in self.speakers + self.listeners:
@@ -462,13 +476,13 @@ async def discuss(self, prompt=None, speakers=None, listeners=None):
     for s in self.speakers:
         a = self.subagents[s]
         utterance = await a.response()
-        # utterance is MessageString with content_id (no need to access transcript!)
+        # utterance is LoggedString with message_id (no need to access transcript!)
 
         # Format the utterance for delivery (no piece_of_text needed)
-        # The formatted message represents the same content as the original utterance
-        msg = MessageString(
+        # The formatted message represents the same content (substance) as the original utterance
+        msg = LoggedString(
             f"[{s}]: {utterance}",
-            content_id=utterance.content_id  # Points to original utterance
+            message_id=utterance.message_id  # Points to original utterance
         )
 
         # Deliver to other participants
@@ -477,29 +491,27 @@ async def discuss(self, prompt=None, speakers=None, listeners=None):
             a.inform(self.subagents[t], msg)
 ```
 
-Note: piece_of_text is only created for the parent's broadcast prompt, not for formatted utterances. The formatted "[Jack]: Hello" message has content_id pointing directly to Jack's original utterance.
+Note: piece_of_text is only created for the parent's broadcast prompt (with `cause` field), not for formatted utterances. The formatted "[Jack]: Hello" message has message_id pointing directly to Jack's original utterance, which becomes the `substance` when Jill logs receiving it.
 
 ### 3. New Module: `session.py`
 
-**MessageString class:**
+**LoggedString class:**
 ```python
-class MessageString(str):
-    """A string with optional logging metadata.
+class LoggedString(str):
+    """A string with its message_id for logging.
 
     During execution, content identity is implicit in the call stack. This class
     externalizes that runtime information for logging without changing APIs.
 
     Args:
         content: The string content
-        content_id: What content does this morally represent?
+        message_id: The message_id identifying the substance of this content
             - For originals: their own message_id in the log
             - For formatted versions: the original content's message_id
-        caused_by: Only for piece_of_text - which tool call created this
     """
-    def __new__(cls, content, content_id=None, caused_by=None):
+    def __new__(cls, content, message_id=None):
         instance = super().__new__(cls, content)
-        instance.content_id = content_id
-        instance.caused_by = caused_by
+        instance.message_id = message_id
         return instance
 ```
 
@@ -527,14 +539,14 @@ class SessionLogger:
                     last_id = max(last_id, num)
         return last_id
 
-    def log_transcript_entry(self, agent_id, message, content_id=None):
+    def log_transcript_entry(self, agent_id, message, substance=None):
         """Log a transcript entry event.
 
         Args:
             agent_id: The agent whose transcript this appears in
             message: The message dict (role, content, tool_calls, etc.)
-            content_id: Optional - what content does this morally represent?
-                       (omit if this entry represents itself)
+            substance: Optional - what content does this morally represent?
+                      (omit if this entry represents itself - new, original content)
         """
         message_id = f"msg_{self.message_counter:03d}"
         self.message_counter += 1
@@ -552,8 +564,8 @@ class SessionLogger:
         if message.get("tool_call_id"):
             event["tool_call_id"] = message["tool_call_id"]
             event["name"] = message.get("name")
-        if content_id:
-            event["content_id"] = content_id
+        if substance:
+            event["substance"] = substance
 
         # Append to JSONL file
         with open(self.session_file, 'a') as f:
@@ -561,12 +573,13 @@ class SessionLogger:
 
         return message_id
 
-    def log_piece_of_text(self, content, caused_by=None):
+    def log_piece_of_text(self, agent_id, content, cause):
         """Log a piece of text event.
 
         Args:
+            agent_id: The agent that created this text
             content: The text content
-            caused_by: Optional message_id of the tool call that generated this
+            cause: The message_id of the tool call that generated this (can be a list)
         """
         message_id = f"msg_{self.message_counter:03d}"
         self.message_counter += 1
@@ -574,19 +587,25 @@ class SessionLogger:
         event = {
             "message_id": message_id,
             "event_type": "piece_of_text",
-            "content": content
+            "agent_id": agent_id,
+            "content": content,
+            "cause": cause
         }
-
-        if caused_by:
-            event["caused_by"] = caused_by
 
         with open(self.session_file, 'a') as f:
             f.write(json.dumps(event) + '\n')
 
         return message_id
 
-    def log_agent_created(self, agent_id, name=None, language_model=None):
-        """Log agent creation."""
+    def log_agent_created(self, agent_id, cause=None, name=None, language_model=None):
+        """Log agent creation.
+
+        Args:
+            agent_id: The unique ID for this agent
+            cause: The message_id of the tool call that created this agent (None for root agent)
+            name: Optional human-readable name
+            language_model: The model this agent uses
+        """
         message_id = f"msg_{self.message_counter:03d}"
         self.message_counter += 1
 
@@ -596,6 +615,8 @@ class SessionLogger:
             "agent_id": agent_id,
             "language_model": language_model
         }
+        if cause:
+            event["cause"] = cause
         if name:
             event["name"] = name
 
@@ -618,42 +639,16 @@ def load_session(session_file):
     agent_transcripts = {}
     agents = {}
 
-    # Track pending tool calls (for inferring agent creation parent)
-    pending_task_calls = []  # Stack of (agent_id, tool_call_id, arguments)
+    # Build index of message_id -> agent_id for finding parent agents
+    msg_to_agent = {}
 
     for event in events:
         event_type = event.get("event_type")
+        msg_id = event.get("message_id")
 
-        if event_type == "agent_created":
+        if event_type == "transcript_entry":
             agent_id = event["agent_id"]
-            name = event.get("name")
-
-            # Infer parent from temporal ordering
-            parent_id = None
-            for caller_id, tool_call_id, args in reversed(pending_task_calls):
-                if name and name in args:
-                    parent_id = caller_id
-                    break
-
-            agents[agent_id] = {
-                "parent_id": parent_id,
-                "name": name,
-                "language_model": event.get("language_model")
-            }
-            agent_transcripts[agent_id] = []
-
-        elif event_type == "transcript_entry":
-            agent_id = event["agent_id"]
-
-            # Track task tool calls for parent inference
-            if event.get("role") == "assistant" and event.get("tool_calls"):
-                for tc in event["tool_calls"]:
-                    if tc.get("function", {}).get("name") == "task":
-                        pending_task_calls.append((
-                            agent_id,
-                            tc["id"],
-                            tc.get("function", {}).get("arguments", "")
-                        ))
+            msg_to_agent[msg_id] = agent_id
 
             # Build message for transcript
             message = {
@@ -664,7 +659,25 @@ def load_session(session_file):
                 message["tool_calls"] = event["tool_calls"]
             if "tool_call_id" in event:
                 message["tool_call_id"] = event["tool_call_id"]
+
+            if agent_id not in agent_transcripts:
+                agent_transcripts[agent_id] = []
             agent_transcripts[agent_id].append(message)
+
+        elif event_type == "agent_created":
+            agent_id = event["agent_id"]
+            cause_msg_id = event.get("cause")
+
+            # Find parent agent from cause
+            parent_id = msg_to_agent.get(cause_msg_id) if cause_msg_id else None
+
+            agents[agent_id] = {
+                "parent_id": parent_id,
+                "name": event.get("name"),
+                "language_model": event.get("language_model")
+            }
+            if agent_id not in agent_transcripts:
+                agent_transcripts[agent_id] = []
 
     # Reconstruct agent tree
     def build_agent(agent_id):
@@ -716,7 +729,7 @@ class SessionViewer:
     def extract_dialog(self, agent_ids):
         """Extract distinct messages exchanged between selected agents.
 
-        Uses content_id to identify when multiple agents received the same message,
+        Uses substance to identify when multiple agents received the same message,
         showing each distinct piece of content only once.
         """
         # Collect all transcript entries for selected agents
@@ -726,25 +739,25 @@ class SessionViewer:
                 e.get("agent_id") in agent_ids):
                 entries.append(e)
 
-        # Track which content_ids we've already shown
+        # Track which substances we've already shown
         seen_content = set()
         dialog = []
 
         for entry in entries:
-            # Get the content ID: either explicit content_id, or the entry itself
-            content_id = entry.get("content_id", entry["message_id"])
+            # Get the substance: either explicit substance field, or the entry itself
+            substance = entry.get("substance", entry["message_id"])
 
             # Skip if we've already shown this content
-            if content_id in seen_content:
+            if substance in seen_content:
                 continue
 
-            seen_content.add(content_id)
+            seen_content.add(substance)
 
-            # Get the content from the content_id message
-            content = self._get_content(content_id)
+            # Get the content from the substance message
+            content = self._get_content(substance)
             if content:
                 dialog.append({
-                    "message_id": content_id,
+                    "message_id": substance,
                     "content": content
                 })
 
@@ -798,9 +811,13 @@ class SessionViewer:
             if event_type == "transcript_entry" and event.get("tool_call_id"):
                 causality[msg_id] = tool_calls_by_id.get(event["tool_call_id"])
 
-            # Transcript entries link via content_id
-            if event_type == "transcript_entry" and event.get("content_id"):
-                causality[msg_id] = event["content_id"]
+            # Transcript entries link via substance
+            if event_type == "transcript_entry" and event.get("substance"):
+                causality[msg_id] = event["substance"]
+
+            # Pieces of text link via cause
+            if event_type == "piece_of_text" and event.get("cause"):
+                causality[msg_id] = event["cause"]
 
         return causality
 
@@ -821,10 +838,10 @@ class SessionViewer:
         return list(reversed(chain))
 
     def trace_content_references(self, content_msg_id):
-        """Find all messages that represent this content."""
+        """Find all messages that represent this content (have it as their substance)."""
         return [e for e in self.events
                 if e.get("event_type") == "transcript_entry"
-                and e.get("content_id") == content_msg_id]
+                and e.get("substance") == content_msg_id]
 ```
 
 ### 4. Main Script (`agent.py`)
@@ -847,7 +864,7 @@ async def main():
         a = Agent()
         session_file = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
 
-        # Log root agent creation
+        # Log root agent creation (no cause for root agent)
         logger = SessionLogger(session_file)
         logger.log_agent_created(
             agent_id=a.agent_id,
@@ -864,18 +881,9 @@ async def main():
             attach_logger(subagent)
     attach_logger(a)
 
-    # Also attach to newly created agents
-    original_create = Agent.__init__
-    def logged_init(self, *args, **kwargs):
-        original_create(self, *args, **kwargs)
-        if hasattr(a, 'logger'):
-            self.logger = a.logger
-            # Log the agent creation
-            self.logger.log_agent_created(
-                agent_id=self.agent_id,
-                language_model=self.language_model
-            )
-    Agent.__init__ = logged_init
+    # Note: Subagent creation will be logged by the parent agent when it calls
+    # the task tool. The tool implementation should call logger.log_agent_created
+    # with the appropriate cause (the message_id of the tool call that created it).
 
     while True:
         prompt = input("> ")
@@ -908,44 +916,52 @@ async def main():
 - Message counter restored from last message_id to avoid collisions
 - Agent._next_id restored to avoid agent ID collisions
 
-### 2. Content Identity and Message Tracking
+### 2. Substance and Causation
 
-**The `content_id` field:**
+**The `substance` field:**
 - Identifies what content a message morally represents
-- For originals: implicitly equals message_id (can be omitted)
+- For originals: omitted (the message represents itself - new content)
 - For formatted versions: points to the original content
 - Enables deduplication without string matching
 - Identifies when multiple agents received the same content
 
+**The `cause` field:**
+- Links new content to what triggered its creation
+- Used in `piece_of_text` events to link to the tool call that generated the text
+- Used in `agent_created` events to link to the tool call that created the agent
+- Can be a list for tool results that compile multiple messages
+- **Mutual exclusivity**: Events have either `substance` (same content as something else) OR `cause` (new content triggered by something), never both
+
 **The `piece_of_text` event:**
 - Stores text generated during tool operation but not in parent's transcript
 - Used for parent's broadcast messages (e.g., prompts sent to multiple participants)
-- Has `caused_by` field linking to the tool call that created it
-- NOT used for formatted utterances - those use content_id to point to original
+- Has `agent_id` field identifying which agent created this text
+- Has `cause` field linking to the tool call that created it
+- NOT used for formatted utterances - those use `substance` to point to original
 
 **Hook transparency example:**
 ```
 msg_001: transcript_entry (Jack says "password: 1234")
-msg_002: transcript_entry (Jill hears "password: [REDACTED]", content_id=msg_001)
+msg_002: transcript_entry (Jill hears "password: [REDACTED]", substance=msg_001)
 ```
-Hook intervention visible by comparing msg_001 content (original) vs msg_002 content (what Jill received). Both have the same content_id, showing they morally represent the same message.
+Hook intervention visible by comparing msg_001 content (original) vs msg_002 content (what Jill received). Both have the same substance, showing they morally represent the same message.
 
 ### 3. Enables Multi-Perspective Viewing
 
 **Jack and Jill dialog:**
 - Collect transcript entries for selected agents (Jack, Jill)
-- Group by `content_id` to identify duplicate content
+- Group by `substance` to identify duplicate content
 - Show each distinct piece of content once
-- Tool-agnostic: viewer doesn't parse tool arguments, just follows content_id links
+- Tool-agnostic: viewer doesn't parse tool arguments, just follows substance links
 
 **Jill's inner monologue:**
 - Filter transcript_entry with `agent_id == "agent_jill"` or `agent_id == "agent_jill_inner"`
 - Shows what Jill heard, her inner thoughts, and what she said
 
 **Information flow analysis:**
-- Trace `content_id` links to find original content
+- Trace `substance` links to find original content
 - Find all messages representing the same content using `trace_content_references()`
-- See who heard what by checking which agents have transcript entries with content_id pointing to the same message
+- See who heard what by checking which agents have transcript entries with substance pointing to the same message
 - No string matching needed - content identity is explicit
 
 ### 4. Supports All Use Cases
@@ -995,16 +1011,16 @@ Hook intervention visible by comparing msg_001 content (original) vs msg_002 con
 **Core abstractions:**
 - **transcript_entry**: What's in an agent's transcript (thoughts, perceptions, actions)
 - **piece_of_text**: Intermediate text during tool operation (not in any agent's transcript)
-- **content_id**: Links transcript entries to the content they represent
-- **caused_by**: Links piece_of_text to the tool call that created it
+- **substance**: Links transcript entries to the content they represent
+- **cause**: Links new content to what triggered its creation
 - **Global ID space**: All events share the same ID namespace
 
 Everything maps to these primitives:
 - Agent creation → special event type
-- Utterances → transcript_entry with role=assistant, no tool_calls
+- Utterances → transcript_entry with role=assistant, no tool_calls (no substance - original content)
 - Tool use → transcript_entry with role=assistant, has tool_calls
-- Parent's broadcast → piece_of_text (with caused_by), multiple transcript entries with content_id pointing to it
-- Formatted utterance → transcript_entry with content_id pointing to original (no piece_of_text)
+- Parent's broadcast → piece_of_text (with cause), multiple transcript entries with substance pointing to it
+- Formatted utterance → transcript_entry with substance pointing to original (no piece_of_text)
 - External input → transcript_entry with role=user
 - Hook prompts → transcript_entry with role=user
 
@@ -1012,30 +1028,32 @@ Everything maps to these primitives:
 - No complex indexing required
 - Easy to append (performance)
 - Easy to query (filter by event_type, agent_id, role, etc.)
-- Causality via explicit links (content_id, caused_by, tool_call_id)
-- Message identity via content_id (no string matching)
+- Relationships via explicit links (substance, cause, tool_call_id)
+- Message identity via substance (no string matching)
 
 **Minimal metadata:**
-- transcript_entry: event_type, agent_id, role, content, optional content_id
-- piece_of_text: event_type, content, optional caused_by
+- transcript_entry: event_type, agent_id, role, content, optional substance
+- piece_of_text: event_type, agent_id, content, cause (can be a list)
+- agent_created: event_type, agent_id, cause, name, language_model
 - Clean separation of concerns
-- No programmer interpretations encoded
+- Explicit relationships (no temporal inference needed)
+- **Mutual exclusivity**: substance OR cause, never both
 
 ### 6. Tool Agnosticism
 
 **Complete tool agnosticism:**
 - Tools create `piece_of_text` events for parent-generated broadcasts
-- Recipient transcript entries have `content_id` pointing to the piece_of_text or original utterance
-- Viewer groups by `content_id` to identify shared messages
+- Recipient transcript entries have `substance` pointing to the piece_of_text or original utterance
+- Viewer groups by `substance` to identify shared messages
 - No knowledge of discuss, broadcast, whisper, translation, or any tool specifics
 - Logging infrastructure never changes as new tools are added
 
 **How it works:**
-- Discuss tool: Creates piece_of_text for parent's prompts (with caused_by), delivers formatted utterances with content_id pointing to original
-- Broadcast tool: Creates piece_of_text for parent's message, sends to all recipients with content_id
-- Whisper tool: Direct delivery with content_id pointing to original, no piece_of_text needed
-- Translation tool: Creates piece_of_text with translated content (caused_by = tool call), delivers with content_id
-- Any future tool: Same pattern - create piece_of_text for parent-generated content, use content_id to link
+- Discuss tool: Creates piece_of_text for parent's prompts (with cause), delivers formatted utterances with substance pointing to original
+- Broadcast tool: Creates piece_of_text for parent's message, sends to all recipients with substance
+- Whisper tool: Direct delivery with substance pointing to original, no piece_of_text needed
+- Translation tool: Creates piece_of_text with translated content (cause = tool call), delivers with substance
+- Any future tool: Same pattern - create piece_of_text for parent-generated content, use substance to link
 
 **Viewer stays simple:**
 ```python
@@ -1048,7 +1066,7 @@ def extract_dialog(agent_ids):
     seen = set()
     dialog = []
     for entry in entries:
-        content_ref = entry.get("content_id", entry["message_id"])
+        content_ref = entry.get("substance", entry["message_id"])
         if content_ref not in seen:
             seen.add(content_ref)
             dialog.append(get_content(content_ref))
@@ -1056,14 +1074,14 @@ def extract_dialog(agent_ids):
     return dialog
 ```
 
-The viewer doesn't need to know if a message was from discuss, broadcast, or any other tool. It just follows `content_id` links.
+The viewer doesn't need to know if a message was from discuss, broadcast, or any other tool. It just follows `substance` links.
 
 ### 7. Viewer Flexibility
 
 **Unknown future analyses supported:**
 - Raw events available for any query
 - Filter by event_type, agent_id, role, etc.
-- Navigate relationships (content_id, caused_by, tool_call_id)
+- Navigate relationships (substance, cause, tool_call_id)
 - Temporal ordering preserved
 - Can build new views without changing log format
 
@@ -1071,34 +1089,34 @@ The viewer doesn't need to know if a message was from discuss, broadcast, or any
 - Timeline view (chronological events)
 - Agent tree view (hierarchical structure from agent_created events)
 - Dialog view (filter utterances by agent set)
-- Content flow diagram (visualize content_id relationships)
-- Causality chain (follow content_id/caused_by/tool_call_id links)
+- Content flow diagram (visualize substance relationships)
+- Causality chain (follow substance/cause/tool_call_id links)
 - Agent perspective (show what an agent heard, thought, said from their transcript)
-- Information propagation (follow content_id to see how utterances spread)
+- Information propagation (follow substance to see how utterances spread)
 - Hook intervention analysis (compare original content with received message content)
 
 ### 8. Clean Responsibility Model
 
 **Core agent method signatures:**
-- `Agent.harken(input)` - unchanged signature, extracts metadata from MessageString
-- `Agent.response()` - returns MessageString with content_id
-- `Agent.inform(dst, txt)` - passes MessageString through, metadata travels invisibly
+- `Agent.harken(input)` - unchanged signature, extracts metadata from LoggedString
+- `Agent.response()` - returns LoggedString with message_id
+- `Agent.inform(dst, txt)` - passes LoggedString through, metadata travels invisibly
 
 **Separation of concerns:**
-- **Content identity is a logging concern**: During execution, content identity is implicit in the call stack
-- **MessageString externalizes runtime semantics**: Converts implicit call stack information into explicit metadata
-- **Operational code stays clean**: No `content_id` parameters polluting the APIs
-- **Logging code extracts metadata**: `getattr(input, 'content_id', None)` at logging boundaries
+- **Substance is a logging concern**: During execution, content identity is implicit in the call stack
+- **LoggedString externalizes runtime semantics**: Converts implicit call stack information into explicit metadata
+- **Operational code stays clean**: No `substance` parameters polluting the APIs
+- **Logging code extracts metadata**: `getattr(input, 'message_id', None)` at logging boundaries
 
-**Why MessageString instead of parameters:**
+**Why LoggedString instead of parameters:**
 ```python
-# Without MessageString (logging pollutes operational code):
-def harken(self, input, content_id=None):  # Logging concern in signature
+# Without LoggedString (logging pollutes operational code):
+def harken(self, input, substance=None):  # Logging concern in signature
     ...
 
-# With MessageString (clean separation):
+# With LoggedString (clean separation):
 def harken(self, input):  # Pure operational signature
-    content_id = getattr(input, 'content_id', None)  # Logging extraction
+    substance = getattr(input, 'message_id', None)  # Logging extraction
     ...
 ```
 
@@ -1127,40 +1145,42 @@ This logging architecture achieves completeness (can resume sessions), flexibili
 
 **Key insights:**
 1. **Transcripts are the state** - Agent state captured entirely in transcript_entry events
-2. **Content identity is a logging concern** - During execution, content identity is implicit in the call stack; logging externalizes it
-3. **MessageString separates concerns** - Logging metadata travels invisibly with strings, extracted at boundaries
-4. **Message identity is explicit** - `content_id` makes it clear when multiple transcript entries represent the same content
-5. **Tool agnostic** - Viewer groups by `content_id`, never needs tool-specific knowledge
+2. **Substance is a logging concern** - During execution, content identity is implicit in the call stack; logging externalizes it
+3. **LoggedString separates concerns** - Logging metadata travels invisibly with strings, extracted at boundaries
+4. **Message identity is explicit** - `substance` makes it clear when multiple transcript entries represent the same content
+5. **Tool agnostic** - Viewer groups by `substance`, never needs tool-specific knowledge
 6. **Hook transparency** - Comparing original content with received content reveals modifications
 7. **Clean APIs** - `harken(input)` signature unchanged; no logging parameters in operational code
+8. **Substance vs cause** - Clear distinction between same content (substance) and triggered content (cause)
 
 This design uses minimal abstractions while supporting all use cases: multi-agent discussions, inner monologue, hooks, external events, information flow analysis, and unknown future cognitive tools. The viewer remains simple and unchanged as new communication patterns emerge.
 
 **Why it works:**
 - **transcript_entry**: What's in an agent's transcript
 - **piece_of_text**: Intermediate text during tool operation (not in parent's transcript)
-- **MessageString**: String subclass carrying logging metadata invisibly
-- **content_id**: Links transcript entries to the content they represent, enables deduplication
-- **caused_by**: Links piece_of_text to the tool call that created it
+- **LoggedString**: String subclass carrying message_id invisibly
+- **substance**: Links transcript entries to the content they represent, enables deduplication
+- **cause**: Links new content to what triggered its creation
 - Operational code: `harken(input)` - clean, no logging concerns
-- Logging code: `getattr(input, 'content_id', None)` - extracts metadata at boundaries
-- Viewer extracts conversations by grouping on `content_id` - no string matching
+- Logging code: `getattr(input, 'message_id', None)` - extracts metadata at boundaries, uses as substance
+- Viewer extracts conversations by grouping on `substance` - no string matching
 - All information needed for analysis is in the event log
+- **Mutual exclusivity**: Events have substance OR cause, never both
 
-**Key benefit of MessageString:**
-The system's operational logic knows content identity implicitly through the call stack. MessageString externalizes this runtime information for logging without polluting the APIs. Compare:
+**Key benefit of LoggedString:**
+The system's operational logic knows content identity implicitly through the call stack. LoggedString externalizes this runtime information for logging without polluting the APIs. Compare:
 
 ```python
-# Without MessageString (logging pollutes operational code):
+# Without LoggedString (logging pollutes operational code):
 utterance_msg_id = await jack.response()
-jill.harken(msg, content_id=utterance_msg_id)  # Logging concern
+jill.harken(msg, substance=utterance_msg_id)  # Logging concern
 
-# With MessageString (clean separation):
-utterance = await jack.response()  # Returns MessageString with content_id
+# With LoggedString (clean separation):
+utterance = await jack.response()  # Returns LoggedString with message_id
 jill.harken(msg)  # Pure operational call; metadata travels invisibly
 ```
 
 **Key benefit of piece_of_text:**
-When the discuss tool sends "You meet in a cafe" to both Jack and Jill, there's one piece_of_text event and two transcript_entry events (both with content_id pointing to it). The viewer knows these are the same message without parsing the discuss tool's arguments or comparing strings. This pattern works for any tool that broadcasts messages.
+When the discuss tool sends "You meet in a cafe" to both Jack and Jill, there's one piece_of_text event (with `cause`) and two transcript_entry events (both with substance pointing to it). The viewer knows these are the same message without parsing the discuss tool's arguments or comparing strings. This pattern works for any tool that broadcasts messages.
 
 This makes the system more transparent, easier to implement, tool-agnostic, reveals emergent phenomena like hook modifications, and maintains clean separation between operational logic and logging concerns.
