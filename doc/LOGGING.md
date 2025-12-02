@@ -504,14 +504,6 @@ class Agent:
         Returns:
             LoggedString with message_id pointing to itself (original content)
         """
-
-    def inform(self, dst, txt):
-        """Send a message from this agent to another agent.
-
-        Args:
-            dst: The destination Agent object
-            txt: The text message (may be LoggedString with metadata)
-        """
 ```
 
 ### SessionViewer Class

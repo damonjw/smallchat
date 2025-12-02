@@ -3,14 +3,14 @@ import collections
 import inspect
 import litellm
 from utils import function_to_tool, spinner, as_described, try_repeatedly
+from session import TrackedString, MultiTrackedString, Session
 import prompts
-
-
 
 
 EXTERNAL_TOOLS = [
     {'name': "web_search", 'type': "web_search_20250305", 'max_uses': 5}
 ]
+
 
 class World:
     def __init__(self, tools):
@@ -24,6 +24,11 @@ class World:
         self.tools = EXTERNAL_TOOLS + [function_to_tool(f,name=n) for n,f in self.f.items()]
 
     async def do_action(self, t):
+        """Perform an action and return a string result.
+
+        If the result is basically the same substance as some previously-logged string, return it as TrackedString.
+        If the result is the causal outcome of processing several previously-logged strings, return it as a MultiTrackedString.
+        """
         # TODO: catch errors, and return them as content
         f = self.f[t.function.name]
         args = json.loads(t.function.arguments)
@@ -31,19 +36,21 @@ class World:
         return res
 
 
-
-
 class Agent:
-    def __init__(self, init_prompt=None):
-        self.language_model = 'anthropic/claude-sonnet-4-5-20250929'
+    def __init__(self, language_model, session, init_prompt=None):
+        self.language_model = language_model
         if init_prompt is None: init_prompt = []
         self.transcript = init_prompt if isinstance(init_prompt, list) else [init_prompt]
         self.world = World([self.task, self.discuss])
+        self.session = session
         self.subagents = {}
 
     def harken(self, input):
-        assert isinstance(input, str), "Expected a string input"
-        self.transcript.append({'role':'user', 'content':input})
+        assert isinstance(input, (str, TrackedString)), "Expected a string input"
+        m = {'role':'user', 'content':str(input)}
+        self.transcript.append(m)
+        substance = input.message_id if isinstance(input, TrackedString) else None
+        self.session.log_transcript_entry(**m, agent=self, substance=substance)
 
     async def response(self, input=None):
         if input is not None: self.harken(input)
@@ -54,13 +61,23 @@ class Agent:
             res = await try_repeatedly(spinner(litellm.acompletion(model=self.language_model, messages=self.transcript, tools=self.world.tools)))
             res = res.choices[0].message
             self.transcript.append(res)
+            tool_calls = [t.model_dump() for t in res.tool_calls] if res.tool_calls else None # sanitized json-able version
+            msg_id = self.session.log_transcript_entry(role=res.role, content=res.content, tool_calls=tool_calls, agent=self)
             if not res.tool_calls:
-                return res.content
+                return TrackedString(res.content, message_id=msg_id)
             else:
                 for t in res.tool_calls:
-                    result = await self.world.do_action(t)
-                    m = {'role':'tool', 'tool_call_id':t.id, 'name':t.function.name, 'content':result}
+                    cause = f"{msg_id}.{t.id}"
+                    self._current_tool_call = cause
+                    res = await self.world.do_action(t)
+                    del self._current_tool_call
+                    m = {'role':'tool', 'tool_call_id':t.id, 'name':t.function.name, 'content':str(res)}
                     self.transcript.append(m)
+                    self.session.log_tool_use(**m, 
+                                              agent = self,
+                                              tool_call = msg_id, 
+                                              substance = res.message_id if isinstance(res,TrackedString) else None, 
+                                              cause = res.message_ids if isinstance(res,MultiTrackedString) else None)
 
 
     @as_described(prompts.TASK)
@@ -73,13 +90,17 @@ class Agent:
         """
         if name in self.subagents:
             raise ValueError("There is already a subagent of this name")
-        self.subagents[name] = Agent(init_prompt={'role':'system', 'content':system_prompt})
         print(f'<Task name="{name}" user_prompt={"..." if user_prompt else None}/>')
+        a = Agent(language_model=self.language_model, session=self.session, init_prompt={'role':'system', 'content':system_prompt})
+        self.subagents[name] = a
+        self.session.log_agent_created(agent=a, name=name, cause=self._current_tool_call, parent=self)
         if user_prompt:
+            user_prompt = self.session.logged_fragment(agent=self, content=user_prompt, cause=self._current_tool_call)
             res = await self.subagents[name].response(user_prompt)
             return res
         else:
             return json.dumps({'subagents': list(self.subagents.keys()), 'status': f"Created subagent: {name}"})
+
 
     @as_described(prompts.DISCUSS)
     async def discuss(self, prompt=None, speakers=None, listeners=None):
@@ -116,51 +137,25 @@ class Agent:
             self.listeners = [s for s in listeners if s not in self.speakers]
         # Send the prompt out
         if prompt is not None:
+            prompt = self.session.logged_fragment(agent=self, content=prompt, cause=self._current_tool_call)
             print("->", prompt)
             for s in self.speakers + self.listeners:
                 self.subagents[s].harken(prompt)
         # A round of discussion
-        if len(self.speakers) == 1 and len(self.listeners) == 0:
+        if len(self.speakers) == 1 and len(self.listeners) == 0: # TODO: in this case, no need for the fragment: the substance is just the tool call
             a = self.subagents[self.speakers[0]]
             res = await a.response()
             print("<-", res)
-            return res
+            return MultiTrackedString(str(res), message_ids=[res.message_id])
         else:
             res = []
             for s in self.speakers:
                 a = self.subagents[s]
                 resp = await a.response()
-                msg = f"[{s}]: {resp}"
+                msg = TrackedString(f"[{s}]: {resp}", message_id=resp.message_id)
                 print("<-", msg)
                 for t in self.speakers + self.listeners:
                     if t == s: continue
                     self.subagents[t].harken(msg)
                 res.append(msg)
-            return '\n\n'.join(res)
-
-
-        
-
-
-
-async def main():
-    import readline # so that `input` lets me use cursor keys
-    a = Agent()
-    while True:
-        prompt = input("> ")
-        response = await a.response(prompt)
-        print(response)
-
-"""
-Create a subagent, and tell it to find the time of sunset in Cambridge today, then report the answer back to me.
-"""
-
-if __name__ == '__main__':
-    import dotenv
-    import asyncio
-    dotenv.load_dotenv() # loads ANTHROPIC_API_KEY into environment variables
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, EOFError):
-        print()
-
+            return MultiTrackedString('\n\n'.join(str(r) for r in res), message_ids=[r.message_id for r in res])
