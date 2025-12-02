@@ -3,7 +3,7 @@ import collections
 import inspect
 import litellm
 from utils import function_to_tool, spinner, as_described, try_repeatedly
-from session import TrackedString, MultiTrackedString, Session
+from session import TrackedString, StringWithCause, Session
 import prompts
 
 
@@ -27,7 +27,7 @@ class World:
         """Perform an action and return a string result.
 
         If the result is basically the same substance as some previously-logged string, return it as TrackedString.
-        If the result is the causal outcome of processing several previously-logged strings, return it as a MultiTrackedString.
+        If the result is the causal outcome of processing several previously-logged strings, return it as a StringWithCause.
         """
         # TODO: catch errors, and return them as content
         f = self.f[t.function.name]
@@ -73,11 +73,11 @@ class Agent:
                     del self._current_tool_call
                     m = {'role':'tool', 'tool_call_id':t.id, 'name':t.function.name, 'content':str(res)}
                     self.transcript.append(m)
-                    self.session.log_tool_use(**m, 
+                    self.session.log_tool_use(**m,
                                               agent = self,
-                                              tool_call = msg_id, 
-                                              substance = res.message_id if isinstance(res,TrackedString) else None, 
-                                              cause = res.message_ids if isinstance(res,MultiTrackedString) else None)
+                                              tool_call = msg_id,
+                                              substance = res.message_id if isinstance(res,TrackedString) else None,
+                                              cause = res.cause if isinstance(res,StringWithCause) else None)
 
 
     @as_described(prompts.TASK)
@@ -146,7 +146,7 @@ class Agent:
             a = self.subagents[self.speakers[0]]
             res = await a.response()
             print("<-", res)
-            return MultiTrackedString(str(res), message_ids=[res.message_id])
+            return StringWithCause(str(res), cause=[res.message_id])
         else:
             res = []
             for s in self.speakers:
@@ -158,4 +158,4 @@ class Agent:
                     if t == s: continue
                     self.subagents[t].harken(msg)
                 res.append(msg)
-            return MultiTrackedString('\n\n'.join(str(r) for r in res), message_ids=[r.message_id for r in res])
+            return StringWithCause('\n\n'.join(str(r) for r in res), cause=[r.message_id for r in res])

@@ -112,7 +112,7 @@ To illustrate, here are some examples.
   - If the tool returned a TrackedString(message_id=Z), that means it's a string which is substantively
     the same as another string that has already been logged, e.g. the output of another agent.
     Store {..., substance:Z} to record this fact.
-  - If the tool returned a MultiTrackedString(message_ids=Z), that means it's a string that has been
+  - If the tool returned a StringWithCause(cause=Z), that means it's a string that has been
     composed out of one or more other strings. Store {..., cause:Z} to record this fact.
     
 - Consider an utterance {msg_id=X, role=assistant, content="hello"} from a subagent.
@@ -128,7 +128,7 @@ To illustrate, here are some examples.
 To facilitate logging code, we'll use the TrackedString class, which extends str but also
 stores message_id. This way, code can pass around TrackedString objects
 and (except for logging code) treat them as normal strings. For tool results, which
-may have multiple causes, there is MultiTrackedString.
+may have multiple causes, there is StringWithCause.
 
 
 LOGGING AGENTS THEMSELVES
@@ -265,8 +265,8 @@ class TrackedString(str):
         instance.message_id = message_id
         return instance
 
-class MultiTrackedString(str):
-    def __new__(cls, s, message_ids):
+class StringWithCause(str):
+    def __new__(cls, s, cause):
         instance = super().__new__(cls, s)
-        instance.message_ids = message_ids
+        instance.cause = cause
         return instance
