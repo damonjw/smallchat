@@ -1,20 +1,79 @@
 """
+GOALS
+
+The logging infrastructure is designed to allow (1) suspend / resume sessions,
+(2) extract various views of agent interactions, e.g. "show just the dialog between
+these three agents".
+
+DESIGN PRINCIPLES
+
+Event sourcing: we can reconstruct the entire state of the system
+by replaying the log i.e. the event stream. The state consists of
+- the set of all agents
+- the subagent relationships between them
+- the interlocutor, i.e. who the end-user is speaking with
+- the metadata of each agent
+- the transcript of each agent
+- TODO: to support suspending in the middle of operations, we should also
+  be able to reconstruct which agents are waiting for input. For this version,
+  we'll only support suspending and resuming while waiting for end-user input.
+
+In the architecture, operations (Agents, response loop, transcripts) should be primary,
+and logging (Session) should be an add-on. In other words, it should be possible to 
+remove all logging code from the Agent, and the operations would still run correctly;
+and furthermore logging shouldn't require changing the function signatures for Agent.
+The existing code very nearly manages this -- the only violation is that the Agent
+constructor includes a handle to the Session, in order for it to even be able to run
+the logging commands provided by Session.
+
+Session maintains a list of all the agents. It is in charge of allocating IDs
+to agents and messages. It provides logging commands, which add entries to the
+log.
+
+Agents are responsible for invoking the log commands. Principally this is to record
+additions to the transcript. There are a few extra logging commands offered:
+- Session can log fragments of text. This is useful for establishing semantic
+  linkages between transcript entries, so they can be displayed in the viewer.
+  It's mostly relevant for detailing communication, in the Discuss tool.
+- Session can log agent creation. This is useful for establishing the relationships
+  between agents. It's redundant -- agents are only created by the Task tool, so
+  the same information could be obtained by parsing tool-use transcript entries --
+  but it's cleaner if the Session resumption / Viewer code doesn't have to know
+  the internals of tools.
+
+
 LOGGING TRANSCRIPTS AND COMMUNICATION
 
-Everything that is placed into a LLM transcript will be logged as
-{message_id, event_type='transcript_entry', agent, role, content}
+Formally, everything that is placed into a LLM transcript will be logged as
+{message_id, event_type='transcript_entry', agent, role, content, ...}
 
-Sometimes it's useful to also log a plain fragment of text. E.g. in the Discuss tool
-the parent sends the same prompt to its subagents. The prompt doesn't appear in
+It's worth recalling the different types of transcript entry:
+- {role:user}: these are the inputs to an agent
+- {role:assistant, tool_calls:[]}: these are "utterances" by the agent
+- {role:assistant, tool_calls:[...]} or {role:tool}: these are for too use by the agent
+
+For semantic tracking in the viewer, it's also useful to be able to log plain
+fragments of text that are produced by an agent but *don't* appear in that agent's
+transcript. For example, consider the Discuss tool, in which the parent sends
+the same prompt to one or more of its subagents. The prompt doesn't appear in
 the parent's transcript, but let's give it a message_id, so that the viewer app
 can track all the things that this prompt caused:
-{message_id, event_type='fragment', agent, content, cause}
+{message_id, event_type='fragment', agent, content, ...}
 
-These two objects may also have a substance field or a cause field (but not both).
-If substance is set, it's a message_id. If cause is set, it may be either a message_id,
-or a list of message_ids.
-- substance: means that the item is essentially the same as another piece of text
-- cause: means that the item was triggered by some other, but it's not the same
+For semantic processing in the viewer, and to enable navigation in the viewer, 
+it's also useful to denote logical dependencies between logged items. There are 
+two types of dependency that the log records capture:
+- If one logged item X is substantially the same as another Y, and if X came first, 
+  then Y will have {..., substance=X_message_id}.
+- If one or logged items X1,...,Xn were processed to produce Y, but it's not
+  substantially the same, then Y will have {..., cause=[X1_message_id,...,Xn_message_id]}.
+  Causes may also have the form "X1_message_id.tool_call_id" to indicate that the cause
+  is a specific tool call. If the list is only one item long, it may be
+  simplified to a string.
+- It doesn't make sense to have both substance and cause set.
+  Setting substance=X implies that the message in question was caused by X --
+  how else could the message have the same substance as X if X did not precede it? --
+  and so it's redundant to also set cause.
 
 To illustrate, here are some examples.
 
@@ -65,14 +124,11 @@ To illustrate, here are some examples.
   in which case it will specify that the transcript entry has cause=X.
   (We'll also allow cause to be a list, to allow for a tool-result that compiles multiple messages.)
 
-The substance and cause fields will be used by the viewer, to enable deduplication
-and tracing of linkages. Setting substance=X implies that the message in question was 
-caused by X -- how else could the message have the same substance as X if X did not precede it? --
-and so there should never be any case where both substance and cause are set.
 
 To facilitate logging code, we'll use the TrackedString class, which extends str but also
 stores message_id. This way, code can pass around TrackedString objects
-and (except for logging code) treat them as normal strings.
+and (except for logging code) treat them as normal strings. For tool results, which
+may have multiple causes, there is MultiTrackedString.
 
 
 LOGGING AGENTS THEMSELVES
@@ -102,7 +158,6 @@ class Session:
     def __init__(self, filename):
         self.agent_id = {'user': 'user'}  # Agent -> agent_id:str. Logs all agents that have ever been used in this session.
         self.next_message_id = 0
-        self.next_agent_id = 1
         self._log_filename = filename
         self.interlocutor = None  # At the moment, this is only used trivially. In future there'll be tools that shift the interlocutor.
 
@@ -126,10 +181,14 @@ class Session:
         return TrackedString(content, message_id=msg_id)
 
     def log_agent_created(self, agent, name, parent, **kwargs):
+        assert name is not None, "Agents must be named"
         if parent == 'user': self.interlocutor = agent
-        agent_id = str(self.next_agent_id)
+        base_agent_id = ''.join(c if c.isalnum() or c == '_' else '_' for c in name.lower()).strip('_')
+        agent_id,i = base_agent_id,1
+        while agent_id in self.agent_id.values():
+            agent_id = f"{base_agent_id}{i}"
+            i = i + 1
         self.agent_id[agent] = agent_id
-        self.next_agent_id = self.next_agent_id + 1
         log = kwargs | {'event_type': 'agent_created', 'agent': agent_id, 'name': name, 'parent': self.agent_id[parent], 'language_model': agent.language_model}
         return self._write(log, required=self.AGENT_CREATED)
 
@@ -194,10 +253,6 @@ class Session:
             agents[agent_id].subagents = {name:agents[sid] for name,sid in spec.subagents.items()}
         session.interlocutor = agents[interlocutor_id]
         session.next_message_id = max_message_id + 1
-        try:
-            session.next_agent_id = max(int(i) for i in agents.keys() if i.isdigit()) + 1
-        except ValueError:
-            pass
         return session
 
 
@@ -211,11 +266,7 @@ class TrackedString(str):
         return instance
 
 class MultiTrackedString(str):
-      def __new__(cls, s, message_ids):
-        if isinstance(s, MultiTrackedString):
-            instance = super().__new__(cls, str(s))
-            instance.message_ids = message_ids + [m for m in s.message_ids if m not in message_ids]
-        else:
-            instance = super().__new__(cls, s)
-            instance.message_ids = message_ids
+    def __new__(cls, s, message_ids):
+        instance = super().__new__(cls, s)
+        instance.message_ids = message_ids
         return instance
