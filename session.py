@@ -100,7 +100,7 @@ class Session:
     """Representation of multi-agent state, backed by an event stream"""
 
     def __init__(self, filename):
-        self.agent_id = {'user': 'user'}  # Agent -> agent_id:str
+        self.agent_id = {'user': 'user'}  # Agent -> agent_id:str. Logs all agents that have ever been used in this session.
         self.next_message_id = 0
         self.next_agent_id = 1
         self._log_filename = filename
@@ -125,12 +125,12 @@ class Session:
         msg_id = self._write(log, required=self.FRAGMENT)
         return TrackedString(content, message_id=msg_id)
 
-    def log_agent_created(self, agent, parent, **kwargs):
+    def log_agent_created(self, agent, name, parent, **kwargs):
         if parent == 'user': self.interlocutor = agent
         agent_id = str(self.next_agent_id)
         self.agent_id[agent] = agent_id
         self.next_agent_id = self.next_agent_id + 1
-        log = kwargs | {'event_type': 'agent_created', 'agent': agent_id, 'parent': self.agent_id[parent], 'language_model': agent.language_model}
+        log = kwargs | {'event_type': 'agent_created', 'agent': agent_id, 'name': name, 'parent': self.agent_id[parent], 'language_model': agent.language_model}
         return self._write(log, required=self.AGENT_CREATED)
 
     def _write(self, log, required):
@@ -152,6 +152,9 @@ class Session:
         agentspec = {}  # agent_id -> AgentSpec
         interlocutor_id = None
         # Replay the event log
+        # Note: this code will crash in various ways if the event log is badly formatted or doesn't meet expectations.
+        # I'm happy with this, for a research platform. I don't want this code to smooth over glitches in the log file!
+        # I could show a more informative error message, but it's not worth it for a research platform.
         max_message_id = -1
         with open(filename, 'r') as f:
             for line in f:
