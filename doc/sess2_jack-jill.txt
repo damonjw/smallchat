@@ -1,8 +1,0 @@
-Create two subagents, call them Jack and Jill. Jack works in HR, and Jill is an aspiring author. We're going to run a discussion between them.
-
-Tell each of them to create an "cornerstone" i.e. "inner self" subagent to support an interior monologue, or chain-of-thought. A cornerstone is a foundational memory or defining experience that shapes a person's core identity, values, and behavioral patterns. It serves as an anchor point from which personality, motivations, and responses emerge—creating psychological coherence by grounding decisions and reactions in a consistent backstory or formative event. In essence: a cornerstone is the "why" behind who someone is, providing emotional and narrative continuity to their character. Before Jack or Jill say anything to each other out loud in the dialog between them, they should each discuss with their inner self what's going through their mind, and then only report back a final utterance. (They both come from high-subtext cultures, so they need an interior monologue to make sense of what the other says and to plan what they should say.)
-
-Explain to them that they will take part in a discussion. Remind them that the discussion should include only their direct speech and actions -- the discussion should not refer to interpretations. For example, you may say "*[I smile]*" but you don't say "*[I smile with genuine warmth]*". It's up to each person to interpret the other's response.
-
-Here's the scenario. They meet by chance in a cafe. Each is possibly looking for romance, but it's not clear if they're suited to each other. Run a discussion between them, for long enough that their romantic chances are clear. 
-
