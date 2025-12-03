@@ -16,7 +16,8 @@ export function parseLog(text) {
         id: event.agent,
         name: event.name,
         parent: event.parent,
-        children: []
+        children: [],
+        systemPrompts: []
       };
     }
   }
@@ -28,11 +29,15 @@ export function parseLog(text) {
     }
   }
 
-  // Third pass: extract messages
+  // Third pass: extract messages and system prompts
   for (const event of events) {
     if (event.event_type === 'transcript_entry') {
+      // Extract system prompts
+      if (event.role === 'system' && agents[event.agent]) {
+        agents[event.agent].systemPrompts.push(event.content);
+      }
       // Only show user messages (inputs) and assistant messages without tool_calls (utterances)
-      if (event.role === 'user') {
+      else if (event.role === 'user') {
         messages.push({
           id: event.message_id,
           agent: event.agent,
@@ -69,7 +74,7 @@ export function deduplicateMessages(messages) {
       if (seenSubstance.has(msg.substance)) {
         continue; // Skip this message
       }
-      seenSubstance.add(msg.id);
+      seenSubstance.add(msg.substance);
     }
 
     // Check content-based deduplication

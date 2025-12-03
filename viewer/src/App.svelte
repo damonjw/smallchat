@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { agents, allMessages, logData, panels } from './stores.js';
-  import { parseLog, deduplicateMessages } from './logParser.js';
+  import { parseLog } from './logParser.js';
   import AgentHierarchy from './AgentHierarchy.svelte';
   import ChatPanels from './ChatPanels.svelte';
 
@@ -12,8 +12,6 @@
   // State for incremental message processing
   let agentsMap = {};
   let messagesList = [];
-  let seenMessages = new Set();
-  let seenSubstance = new Set();
 
   function processEvent(event) {
     if (event.event_type === 'agent_created') {
@@ -23,7 +21,8 @@
           id: event.agent,
           name: event.name,
           parent: event.parent,
-          children: []
+          children: [],
+          systemPrompts: []
         };
 
         // Update parent's children list
@@ -37,20 +36,16 @@
         agents.set({ ...agentsMap });
       }
     } else if (event.event_type === 'transcript_entry') {
+      // Handle system prompts
+      if (event.role === 'system' && agentsMap[event.agent]) {
+        agentsMap[event.agent].systemPrompts.push(event.content);
+        agents.set({ ...agentsMap });
+        return;
+      }
+
       // Process messages (only user inputs and assistant utterances without tool_calls)
       if (event.role === 'user' || (event.role === 'assistant' && !event.tool_calls)) {
-        // Check for deduplication
-        const contentKey = `${event.role}:${event.content}`;
-
-        // Skip if we've seen this substance or content
-        if (event.substance && seenSubstance.has(event.substance)) {
-          return;
-        }
-        if (seenMessages.has(contentKey)) {
-          return;
-        }
-
-        // Add message
+        // Add message (no global deduplication - will be done per-panel)
         const msg = {
           id: event.message_id,
           agent: event.agent,
@@ -60,12 +55,6 @@
         };
 
         messagesList.push(msg);
-        seenMessages.add(contentKey);
-        if (event.substance) {
-          seenSubstance.add(event.substance);
-        } else {
-          seenSubstance.add(event.message_id);
-        }
 
         // Update store
         allMessages.set([...messagesList]);
@@ -93,7 +82,18 @@
     return eventSource;
   }
 
-  onMount(() => {
+  onMount(async () => {
+    // Fetch session info and set page title
+    try {
+      const response = await fetch('/session-info');
+      const data = await response.json();
+      if (data.filename) {
+        document.title = data.filename;
+      }
+    } catch (err) {
+      console.error('Failed to fetch session info:', err);
+    }
+
     // Connect to SSE on mount
     const eventSource = connectToSSE();
 
@@ -128,10 +128,9 @@
 
     const text = await file.text();
     const { agents: parsedAgents, messages } = parseLog(text);
-    const dedupedMessages = deduplicateMessages(messages);
 
     agents.set(parsedAgents);
-    allMessages.set(dedupedMessages);
+    allMessages.set(messages);
     fileLoaded = true;
     liveMode = false;
   }

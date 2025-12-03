@@ -1,5 +1,6 @@
 <script>
   import { panels, allMessages, agents } from './stores.js';
+  import { deduplicateMessages } from './logParser.js';
   import Message from './Message.svelte';
   import { getAgentBadgeColor, getAgentBorderColor } from './colors.js';
 
@@ -59,13 +60,88 @@
     return panel.agentIds.includes(message.agent);
   }
 
-  // Check if a message should be displayed (belongs to at least one panel)
-  function messageInAnyPanel(message, panels) {
-    return panels.some(panel => messageInPanel(message, panel));
+  // Create per-panel deduplicated message lists
+  function getPerPanelMessages(allMessages, panels) {
+    const panelMessages = new Map();
+
+    for (const panel of panels) {
+      // Get messages for this panel's agents
+      const panelMsgs = allMessages.filter(msg => messageInPanel(msg, panel));
+      // Deduplicate per panel
+      const dedupedMsgs = deduplicateMessages(panelMsgs);
+      panelMessages.set(panel.id, new Set(dedupedMsgs.map(m => m.id)));
+    }
+
+    return panelMessages;
   }
 
-  // Filter messages to only show those that appear in at least one panel
-  $: visibleMessages = $allMessages.filter(msg => messageInAnyPanel(msg, $panels));
+  // Create row groups where messages with same substance are aligned
+  function createRowGroups(allMessages, panelMessages, panels) {
+    const rowGroups = [];
+    const substanceToRow = new Map(); // substance -> row index
+    const messageIdToRow = new Map(); // message id -> row index
+    const processedMessageIds = new Set();
+
+    for (const msg of allMessages) {
+      // Skip if already processed
+      if (processedMessageIds.has(msg.id)) continue;
+
+      // Check if this message is visible in any panel
+      let isVisible = false;
+      for (const panel of panels) {
+        if (panelMessages.get(panel.id)?.has(msg.id)) {
+          isVisible = true;
+          break;
+        }
+      }
+      if (!isVisible) continue;
+
+      let rowIndex;
+
+      if (msg.substance) {
+        // Check if we already have a row for this substance
+        if (substanceToRow.has(msg.substance)) {
+          rowIndex = substanceToRow.get(msg.substance);
+          rowGroups[rowIndex].messages.push(msg);
+        }
+        // Check if there's a message with id matching this substance
+        else if (messageIdToRow.has(msg.substance)) {
+          rowIndex = messageIdToRow.get(msg.substance);
+          rowGroups[rowIndex].messages.push(msg);
+          // Also map this substance to the row
+          substanceToRow.set(msg.substance, rowIndex);
+        }
+        else {
+          // Create new row for this substance
+          rowIndex = rowGroups.length;
+          substanceToRow.set(msg.substance, rowIndex);
+          rowGroups.push({
+            substance: msg.substance,
+            messages: [msg]
+          });
+        }
+      } else {
+        // No substance - create new row
+        rowIndex = rowGroups.length;
+        rowGroups.push({
+          substance: null,
+          messages: [msg]
+        });
+        // Map this message's id to the row so other messages can reference it
+        messageIdToRow.set(msg.id, rowIndex);
+      }
+
+      processedMessageIds.add(msg.id);
+    }
+
+    return rowGroups;
+  }
+
+  // Reactive: compute per-panel deduplicated messages
+  $: panelMessages = getPerPanelMessages($allMessages, $panels);
+
+  // Reactive: create row groups with substance-based alignment
+  $: rowGroups = createRowGroups($allMessages, panelMessages, $panels);
 </script>
 
 <div class="panels-container">
@@ -109,23 +185,59 @@
       </div>
     </div>
 
+    <!-- System prompts row -->
+    <div class="system-prompts-row">
+      {#each $panels as panel (panel.id)}
+        <div class="system-prompts-cell">
+          {#if panel.agentIds.length === 1}
+            <!-- Single agent: show system prompt without agent name -->
+            {@const agentId = panel.agentIds[0]}
+            {@const agent = $agents[agentId]}
+            {#if agent && agent.systemPrompts && agent.systemPrompts.length > 0}
+              {#each agent.systemPrompts as prompt}
+                <div class="system-prompt-box">
+                  <div class="system-prompt-content">{prompt}</div>
+                </div>
+              {/each}
+            {/if}
+          {:else}
+            <!-- Multiple agents: show each agent's system prompt with name -->
+            {#each panel.agentIds as agentId (agentId)}
+              {@const agent = $agents[agentId]}
+              {#if agent && agent.systemPrompts && agent.systemPrompts.length > 0}
+                {#each agent.systemPrompts as prompt}
+                  <div class="system-prompt-box">
+                    <div class="system-prompt-agent-name">{agent.name}</div>
+                    <div class="system-prompt-content">{prompt}</div>
+                  </div>
+                {/each}
+              {/if}
+            {/each}
+          {/if}
+        </div>
+      {/each}
+      <div class="message-cell-spacer"></div>
+    </div>
+
     <!-- Messages grid -->
     <div class="messages-grid">
-      {#if visibleMessages.length === 0}
+      {#if rowGroups.length === 0}
         <div class="empty-state">No messages to display</div>
       {:else}
-        {#each visibleMessages as message (message.id)}
+        {#each rowGroups as rowGroup, rowIndex (rowGroup.substance || `row-${rowIndex}`)}
           <div class="message-row">
             {#each $panels as panel (panel.id)}
               <div class="message-cell">
-                {#if messageInPanel(message, panel)}
-                  <Message
-                    {message}
-                    agentName={$agents[message.agent]?.name}
-                    agentId={message.agent}
-                    showPrefix={panel.agentIds.length > 1}
-                  />
-                {/if}
+                {#each rowGroup.messages as message (message.id)}
+                  {#if panelMessages.get(panel.id)?.has(message.id)}
+                    <Message
+                      {message}
+                      agentName={$agents[message.agent]?.name}
+                      agentId={message.agent}
+                      showPrefix={panel.agentIds.length > 1}
+                    />
+                  {/if}
+                {/each}
               </div>
             {/each}
             <div class="message-cell-spacer"></div>
@@ -245,5 +357,38 @@
     text-align: center;
     color: #999;
     font-style: italic;
+  }
+
+  .system-prompts-row {
+    display: flex;
+    min-height: fit-content;
+  }
+
+  .system-prompts-cell {
+    flex: 1;
+    min-width: 400px;
+    padding: 0.5rem 1rem;
+    border-right: 1px solid #e0e0e0;
+  }
+
+  .system-prompt-box {
+    border: 2px solid #000;
+    padding: 0.75rem;
+    margin-bottom: 0.5rem;
+    background: #f5f5f5;
+  }
+
+  .system-prompt-agent-name {
+    font-weight: bold;
+    margin-bottom: 0.5rem;
+    color: #333;
+  }
+
+  .system-prompt-content {
+    white-space: pre-wrap;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    color: #333;
   }
 </style>
