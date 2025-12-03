@@ -3,8 +3,11 @@ import readline  # so that `input` lets me use cursor keys
 from pathlib import Path
 import argparse
 import dotenv
+import webbrowser
+import time
 from agent import Agent
 from session import Session
+from server import start_server
 
 dotenv.load_dotenv() # loads ANTHROPIC_API_KEY into environment variables
 SESSIONS_DIR = Path('.chats')
@@ -66,6 +69,16 @@ Create a subagent, and tell it to find the time of sunset in Cambridge today, th
 if __name__ == '__main__':
     args = parser.parse_args()
     session = get_session(args)
+
+    # Start the Flask server with SSE for live viewer updates
+    SERVER_PORT = 5000
+    print(f"Starting web viewer at http://127.0.0.1:{SERVER_PORT}")
+    start_server(session._log_filename, port=SERVER_PORT)
+
+    # Give the server a moment to start, then open the browser
+    time.sleep(0.5)
+    webbrowser.open(f'http://127.0.0.1:{SERVER_PORT}')
+
     try:
         asyncio.run(interact(session))
     except (KeyboardInterrupt, EOFError):
