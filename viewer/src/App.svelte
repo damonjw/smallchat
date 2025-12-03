@@ -83,6 +83,36 @@
   }
 
   onMount(async () => {
+    // Check for URL parameter: ?log=/path/to/file.jsonl
+    const urlParams = new URLSearchParams(window.location.search);
+    const logPath = urlParams.get('log');
+
+    if (logPath) {
+      // URL parameter mode: fetch the specified log file
+      try {
+        const response = await fetch(logPath);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch log file: ${response.status} ${response.statusText}`);
+        }
+        const text = await response.text();
+        const { agents: parsedAgents, messages } = parseLog(text);
+
+        agents.set(parsedAgents);
+        allMessages.set(messages);
+        fileLoaded = true;
+        liveMode = false;
+
+        // Set page title from filename
+        const filename = logPath.split('/').pop();
+        document.title = filename || 'Log Viewer';
+      } catch (err) {
+        console.error('Failed to load log file from URL:', err);
+        alert(`Failed to load log file: ${err.message}`);
+      }
+      return; // Skip SSE connection
+    }
+
+    // Live mode: connect to SSE
     // Fetch session info and set page title
     try {
       const response = await fetch('/session-info');
@@ -152,6 +182,9 @@
         <p>Connecting to live session...</p>
         <p style="font-size: 0.9rem; color: #888; margin-top: 1rem;">
           Or drag and drop a .jsonl log file here to view it
+        </p>
+        <p style="font-size: 0.8rem; color: #aaa; margin-top: 0.5rem;">
+          (You can also use ?log=/path/to/file.jsonl)
         </p>
       </div>
     </div>

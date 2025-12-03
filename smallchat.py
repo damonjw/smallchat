@@ -18,6 +18,8 @@ session_group = parser.add_mutually_exclusive_group()
 session_group.add_argument('--new', action='store_true', help="Start a new chat session")
 session_group.add_argument('--resume', type=str, metavar='FILENAME', help="Resume existing chat session")
 parser.add_argument('-nw', '--no-window', action='store_true', help="Don't open browser window")
+parser.add_argument('--model', type=str, default='anthropic/claude-sonnet-4-5-20250929',
+                    help="Language model to use for new sessions (default: anthropic/claude-sonnet-4-5-20250929)")
 
 
 
@@ -45,8 +47,9 @@ def get_session(args):
     # Do it!
     if action == 'new':
         print(f"Logging to {filename}")
+        print(f"Using language model: {args.model}")
         session = Session(str(filename))
-        a = Agent(session=session, language_model='anthropic/claude-sonnet-4-5-20250929')
+        a = Agent(session=session, language_model=args.model)
         session.log_agent_created(a, cause='user', parent='user', name='Primary')
     else:
         print(f"Resuming from {filename}")
