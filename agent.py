@@ -60,7 +60,7 @@ class Agent:
         # Can it end in a system message? Can I put in an empty user message?
         assert len(self.transcript) > 0 and self.transcript[-1]['role'] == 'user'
         while True:
-            res = await try_repeatedly(spinner(litellm.acompletion(model=self.language_model, messages=self.transcript, tools=self.world.tools)))
+            res = await try_repeatedly(lambda: spinner(litellm.acompletion(model=self.language_model, messages=self.transcript, tools=self.world.tools)))
             res = res.choices[0].message
             self.transcript.append(res)
             tool_calls = [t.model_dump() for t in res.tool_calls] if res.tool_calls else None # sanitized json-able version

@@ -10,7 +10,7 @@ export const agents = writable({});
 export const allMessages = writable([]);
 
 // Currently active chat panels: [{ id, agentIds: [] }]
-export const panels = writable([{ id: 0, agentIds: [] }]);
+export const panels = writable([]);
 
 // Derived: get the interlocutor (first agent with parent='user')
 export const interlocutor = derived(agents, $agents => {
@@ -21,7 +21,8 @@ export const interlocutor = derived(agents, $agents => {
 interlocutor.subscribe(inter => {
   if (inter) {
     panels.update(p => {
-      if (p.length === 1 && p[0].agentIds.length === 0) {
+      // Only auto-populate if there are no panels yet
+      if (p.length === 0) {
         return [{ id: 0, agentIds: [inter.id] }];
       }
       return p;

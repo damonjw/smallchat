@@ -5,6 +5,9 @@
   import { getAgentBadgeColor, getAgentBorderColor } from './colors.js';
 
   let nextPanelId = 1;
+  let hoveredDivider = null; // Track which divider is being hovered during drag
+  let hoveredPanel = null; // Track which panel is being hovered during drag
+  let dragSourcePanel = null; // Track which panel an agent badge is being dragged from
 
   function removePanel(panelId) {
     panels.update(p => p.filter(panel => panel.id !== panelId));
@@ -13,6 +16,15 @@
   function createNewPanel(agentId) {
     const newPanel = { id: nextPanelId++, agentIds: [agentId] };
     panels.update(p => [...p, newPanel]);
+  }
+
+  function insertPanelAtPosition(agentId, position) {
+    const newPanel = { id: nextPanelId++, agentIds: [agentId] };
+    panels.update(p => {
+      const newPanels = [...p];
+      newPanels.splice(position, 0, newPanel);
+      return newPanels;
+    });
   }
 
   function addAgentToPanel(panelId, agentId) {
@@ -39,20 +51,82 @@
     });
   }
 
+  function handleBadgeDragStart(panelId, agentId, e) {
+    e.stopPropagation(); // Prevent panel drag handlers from firing
+    dragSourcePanel = panelId;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('application/json', JSON.stringify({ agentId, fromPanel: panelId }));
+  }
+
+  function handleBadgeDragEnd(panelId, agentId, e) {
+    // If drop was not successful (dropEffect is 'none'), remove the agent from the panel
+    if (e.dataTransfer.dropEffect === 'none') {
+      removeAgentFromPanel(panelId, agentId);
+    }
+    dragSourcePanel = null;
+  }
+
   function handlePanelDrop(panelId, e) {
     e.preventDefault();
+    e.stopPropagation();
+    hoveredPanel = null;
     const data = JSON.parse(e.dataTransfer.getData('application/json'));
     if (data.agentId) {
+      // If moving from another panel, remove from source first
+      if (data.fromPanel !== undefined && data.fromPanel !== panelId) {
+        removeAgentFromPanel(data.fromPanel, data.agentId);
+      }
       addAgentToPanel(panelId, data.agentId);
     }
   }
 
-  function handleNewPanelDrop(e) {
+  function handlePanelDragOver(panelId, e) {
+    e.preventDefault();
+    e.stopPropagation();
+    hoveredPanel = panelId;
+  }
+
+  function handlePanelDragLeave(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    hoveredPanel = null;
+  }
+
+  function handleDividerDrop(position, e) {
+    e.preventDefault();
+    e.stopPropagation();
+    hoveredDivider = null;
+    const data = JSON.parse(e.dataTransfer.getData('application/json'));
+    if (data.agentId) {
+      // If moving from a panel, remove from source first
+      if (data.fromPanel !== undefined) {
+        removeAgentFromPanel(data.fromPanel, data.agentId);
+      }
+      insertPanelAtPosition(data.agentId, position);
+    }
+  }
+
+  function handleEmptyStateDrop(e) {
     e.preventDefault();
     const data = JSON.parse(e.dataTransfer.getData('application/json'));
     if (data.agentId) {
+      // If moving from a panel, remove from source first
+      if (data.fromPanel !== undefined) {
+        removeAgentFromPanel(data.fromPanel, data.agentId);
+      }
       createNewPanel(data.agentId);
     }
+  }
+
+  function handleDividerDragOver(dividerId, e) {
+    e.preventDefault();
+    e.stopPropagation();
+    hoveredDivider = dividerId;
+  }
+
+  function handleDividerDragLeave(e) {
+    e.preventDefault();
+    hoveredDivider = null;
   }
 
   // Check if a message belongs to a panel (agent is sender or receiver)
@@ -145,107 +219,203 @@
 </script>
 
 <div class="panels-container">
-  <!-- Shared scroll container for both headers and messages -->
-  <div class="messages-scroll-container">
-    <!-- Sticky panel headers -->
-    <div class="panel-headers">
-      {#each $panels as panel (panel.id)}
-        <div
-          class="panel-header"
-          role="region"
-          aria-label="Panel header drop zone"
-          on:dragover={(e) => e.preventDefault()}
-          on:drop={(e) => handlePanelDrop(panel.id, e)}
-        >
-          <div class="agent-badges">
-            {#each panel.agentIds as agentId (agentId)}
-              {@const agent = $agents[agentId]}
-              {#if agent}
-                {@const colorKey = agentId + '_' + agent.name}
-                <span
-                  class="agent-badge"
-                  style="background-color: {getAgentBadgeColor(colorKey)}; border-color: {getAgentBorderColor(colorKey)};"
-                >
-                  {agent.name}
-                  <button class="remove-btn" on:click={() => removeAgentFromPanel(panel.id, agentId)}>×</button>
-                </span>
-              {/if}
-            {/each}
-          </div>
-        </div>
-      {/each}
+  {#if $panels.length === 0}
+    <!-- Empty state -->
+    <div class="empty-state-container">
       <div
-        class="new-panel-drop-zone"
+        class="empty-state-header"
         role="region"
-        aria-label="Drop to create new panel"
+        aria-label="Drop zone for first panel"
         on:dragover={(e) => e.preventDefault()}
-        on:drop={handleNewPanelDrop}
+        on:drop={handleEmptyStateDrop}
       >
-        <div class="drop-hint">⊕</div>
+        <div class="empty-state-text">Drag an agent here to view its transcript</div>
       </div>
     </div>
+  {:else}
+    <!-- Shared scroll container for both headers and messages -->
+    <div class="messages-scroll-container">
+      <!-- Sticky panel headers -->
+      <div class="panel-headers">
+        {#each $panels as panel, index (panel.id)}
+          <!-- Left divider (before first panel or between panels) -->
+          <div
+            class="divider-drop-zone"
+            class:hovered={hoveredDivider === `divider-${index}`}
+            role="region"
+            aria-label="Drop zone to insert panel"
+            on:dragover={(e) => handleDividerDragOver(`divider-${index}`, e)}
+            on:dragleave={handleDividerDragLeave}
+            on:drop={(e) => handleDividerDrop(index, e)}
+          >
+          </div>
 
-    <!-- System prompts row -->
-    <div class="system-prompts-row">
-      {#each $panels as panel (panel.id)}
-        <div class="system-prompts-cell">
-          {#if panel.agentIds.length === 1}
-            <!-- Single agent: show system prompt without agent name -->
-            {@const agentId = panel.agentIds[0]}
-            {@const agent = $agents[agentId]}
-            {#if agent && agent.systemPrompts && agent.systemPrompts.length > 0}
-              {#each agent.systemPrompts as prompt}
-                <div class="system-prompt-box">
-                  <div class="system-prompt-content">{prompt}</div>
-                </div>
+          <!-- Panel header -->
+          <div
+            class="panel-header"
+            class:hovered={hoveredPanel === panel.id}
+            role="region"
+            aria-label="Panel header drop zone"
+            on:dragover={(e) => handlePanelDragOver(panel.id, e)}
+            on:dragleave={handlePanelDragLeave}
+            on:drop={(e) => handlePanelDrop(panel.id, e)}
+          >
+            <div class="agent-badges">
+              {#each panel.agentIds as agentId (agentId)}
+                {@const agent = $agents[agentId]}
+                {#if agent}
+                  {@const colorKey = agentId + '_' + agent.name}
+                  <span
+                    class="agent-badge"
+                    role="button"
+                    tabindex="0"
+                    draggable="true"
+                    on:dragstart={(e) => handleBadgeDragStart(panel.id, agentId, e)}
+                    on:dragend={(e) => handleBadgeDragEnd(panel.id, agentId, e)}
+                    style="background-color: {getAgentBadgeColor(colorKey)}; border-color: {getAgentBorderColor(colorKey)};"
+                  >
+                    {agent.name}
+                    <button class="remove-btn" on:click={() => removeAgentFromPanel(panel.id, agentId)}>×</button>
+                  </span>
+                {/if}
               {/each}
-            {/if}
-          {:else}
-            <!-- Multiple agents: show each agent's system prompt with name -->
-            {#each panel.agentIds as agentId (agentId)}
+            </div>
+          </div>
+        {/each}
+
+        <!-- Right divider (after last panel) -->
+        <div
+          class="divider-drop-zone"
+          class:hovered={hoveredDivider === `divider-${$panels.length}`}
+          role="region"
+          aria-label="Drop zone to insert panel"
+          on:dragover={(e) => handleDividerDragOver(`divider-${$panels.length}`, e)}
+          on:dragleave={handleDividerDragLeave}
+          on:drop={(e) => handleDividerDrop($panels.length, e)}
+        >
+        </div>
+      </div>
+
+      <!-- System prompts row -->
+      <div class="system-prompts-row">
+        {#each $panels as panel, index (panel.id)}
+          <!-- Left divider drop zone -->
+          <div
+            class="divider-drop-zone"
+            class:hovered={hoveredDivider === `divider-${index}`}
+            role="region"
+            aria-label="Drop zone to insert panel"
+            on:dragover={(e) => handleDividerDragOver(`divider-${index}`, e)}
+            on:dragleave={handleDividerDragLeave}
+            on:drop={(e) => handleDividerDrop(index, e)}
+          ></div>
+
+          <!-- System prompts cell -->
+          <div
+            class="system-prompts-cell"
+            role="region"
+            aria-label="Panel drop zone"
+            on:dragover={(e) => handlePanelDragOver(panel.id, e)}
+            on:dragleave={handlePanelDragLeave}
+            on:drop={(e) => handlePanelDrop(panel.id, e)}
+          >
+            {#if panel.agentIds.length === 1}
+              <!-- Single agent: show system prompt without agent name -->
+              {@const agentId = panel.agentIds[0]}
               {@const agent = $agents[agentId]}
               {#if agent && agent.systemPrompts && agent.systemPrompts.length > 0}
                 {#each agent.systemPrompts as prompt}
                   <div class="system-prompt-box">
-                    <div class="system-prompt-agent-name">{agent.name}</div>
                     <div class="system-prompt-content">{prompt}</div>
                   </div>
                 {/each}
               {/if}
-            {/each}
-          {/if}
-        </div>
-      {/each}
-      <div class="message-cell-spacer"></div>
-    </div>
-
-    <!-- Messages grid -->
-    <div class="messages-grid">
-      {#if rowGroups.length === 0}
-        <div class="empty-state">No messages to display</div>
-      {:else}
-        {#each rowGroups as rowGroup, rowIndex (rowGroup.substance || `row-${rowIndex}`)}
-          <div class="message-row">
-            {#each $panels as panel (panel.id)}
-              <div class="message-cell">
-                {#each rowGroup.messages as message (message.id)}
-                  {#if panelMessages.get(panel.id)?.has(message.id)}
-                    <Message
-                      {message}
-                      agentName={$agents[message.agent]?.name}
-                      agentId={message.agent}
-                      showPrefix={panel.agentIds.length > 1}
-                    />
-                  {/if}
-                {/each}
-              </div>
-            {/each}
-            <div class="message-cell-spacer"></div>
+            {:else}
+              <!-- Multiple agents: show each agent's system prompt with name -->
+              {#each panel.agentIds as agentId (agentId)}
+                {@const agent = $agents[agentId]}
+                {#if agent && agent.systemPrompts && agent.systemPrompts.length > 0}
+                  {#each agent.systemPrompts as prompt}
+                    <div class="system-prompt-box">
+                      <div class="system-prompt-agent-name">{agent.name}</div>
+                      <div class="system-prompt-content">{prompt}</div>
+                    </div>
+                  {/each}
+                {/if}
+              {/each}
+            {/if}
           </div>
         {/each}
-      {/if}
+
+        <!-- Right divider drop zone -->
+        <div
+          class="divider-drop-zone"
+          class:hovered={hoveredDivider === `divider-${$panels.length}`}
+          role="region"
+          aria-label="Drop zone to insert panel"
+          on:dragover={(e) => handleDividerDragOver(`divider-${$panels.length}`, e)}
+          on:dragleave={handleDividerDragLeave}
+          on:drop={(e) => handleDividerDrop($panels.length, e)}
+        ></div>
+      </div>
+
+      <!-- Messages grid -->
+      <div class="messages-grid">
+        {#if rowGroups.length === 0}
+          <div class="empty-state">No messages to display</div>
+        {:else}
+          {#each rowGroups as rowGroup, rowIndex (rowGroup.substance || `row-${rowIndex}`)}
+            <div class="message-row">
+              {#each $panels as panel, index (panel.id)}
+                <!-- Left divider drop zone -->
+                <div
+                  class="divider-drop-zone"
+                  class:hovered={hoveredDivider === `divider-${index}`}
+                  role="region"
+                  aria-label="Drop zone to insert panel"
+                  on:dragover={(e) => handleDividerDragOver(`divider-${index}`, e)}
+                  on:dragleave={handleDividerDragLeave}
+                  on:drop={(e) => handleDividerDrop(index, e)}
+                ></div>
+
+                <!-- Message cell -->
+                <div
+                  class="message-cell"
+                  role="region"
+                  aria-label="Panel drop zone"
+                  on:dragover={(e) => handlePanelDragOver(panel.id, e)}
+                  on:dragleave={handlePanelDragLeave}
+                  on:drop={(e) => handlePanelDrop(panel.id, e)}
+                >
+                  {#each rowGroup.messages as message (message.id)}
+                    {#if panelMessages.get(panel.id)?.has(message.id)}
+                      <Message
+                        {message}
+                        agentName={$agents[message.agent]?.name}
+                        agentId={message.agent}
+                        showPrefix={panel.agentIds.length > 1}
+                      />
+                    {/if}
+                  {/each}
+                </div>
+              {/each}
+
+              <!-- Right divider drop zone -->
+              <div
+                class="divider-drop-zone"
+                class:hovered={hoveredDivider === `divider-${$panels.length}`}
+                role="region"
+                aria-label="Drop zone to insert panel"
+                on:dragover={(e) => handleDividerDragOver(`divider-${$panels.length}`, e)}
+                on:dragleave={handleDividerDragLeave}
+                on:drop={(e) => handleDividerDrop($panels.length, e)}
+              ></div>
+            </div>
+          {/each}
+        {/if}
+      </div>
     </div>
-  </div>
+  {/if}
 </div>
 
 <style>
@@ -253,6 +423,31 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+  }
+
+  .empty-state-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
+  .empty-state-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.75rem;
+    border-bottom: 2px solid #ddd;
+    background: #f9f9f9;
+    min-height: 3rem;
+  }
+
+  .empty-state-text {
+    color: #999;
+    font-style: italic;
+    font-size: 1rem;
   }
 
   .messages-scroll-container {
@@ -270,11 +465,39 @@
     background: #f9f9f9;
   }
 
+  .divider-drop-zone {
+    min-width: 2em;
+    width: 2em;
+    background: transparent;
+    position: relative;
+    transition: background 0.2s;
+    cursor: pointer;
+  }
+
+  .divider-drop-zone::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: #333;
+    transform: translateX(-50%);
+  }
+
+  .divider-drop-zone.hovered {
+    background: rgba(173, 216, 230, 0.5); /* Light blue translucent */
+  }
+
   .panel-header {
     flex: 1;
     min-width: 400px;
     padding: 0.75rem;
-    border-right: 1px solid #ddd;
+    transition: background 0.2s;
+  }
+
+  .panel-header.hovered {
+    background: rgba(173, 216, 230, 0.5); /* Light blue translucent */
   }
 
   .agent-badges {
@@ -292,6 +515,8 @@
     font-size: 0.9rem;
     font-weight: 500;
     border: 1px solid;
+    cursor: move;
+    user-select: none;
   }
 
   .remove-btn {
@@ -308,28 +533,6 @@
     color: #d32f2f;
   }
 
-  .new-panel-drop-zone {
-    min-width: 4em;
-    width: 4em;
-    border-right: 1px solid #ddd;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0.5rem;
-    transition: background 0.2s;
-  }
-
-  .new-panel-drop-zone:hover {
-    background: #f0f8ff;
-  }
-
-  .drop-hint {
-    color: #999;
-    font-size: 2rem;
-    line-height: 1;
-    text-align: center;
-  }
-
   .messages-grid {
     min-width: fit-content;
   }
@@ -343,13 +546,6 @@
     flex: 1;
     min-width: 400px;
     padding: 0.5rem 1rem;
-    border-right: 1px solid #e0e0e0;
-  }
-
-  .message-cell-spacer {
-    min-width: 4em;
-    width: 4em;
-    border-right: 1px solid #e0e0e0;
   }
 
   .empty-state {
@@ -368,14 +564,13 @@
     flex: 1;
     min-width: 400px;
     padding: 0.5rem 1rem;
-    border-right: 1px solid #e0e0e0;
   }
 
   .system-prompt-box {
-    border: 2px solid #000;
+    border: 2pt dashed #000;
     padding: 0.75rem;
     margin-bottom: 0.5rem;
-    background: #f5f5f5;
+    background: #ffffff;
   }
 
   .system-prompt-agent-name {
@@ -386,8 +581,8 @@
 
   .system-prompt-content {
     white-space: pre-wrap;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    font-size: 0.9rem;
+    font-family: monospace, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 0.8rem;
     line-height: 1.5;
     color: #333;
   }

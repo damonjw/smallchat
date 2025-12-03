@@ -23,12 +23,17 @@ async def spinner(awaitable):
         sys.stdout.write("\r" + " " * 30 + "\r")
 
 
-async def try_repeatedly(awaitable):
-    """Retry an async operation indefinitely with exponential backoff."""
+async def try_repeatedly(async_func):
+    """Retry an async operation indefinitely with exponential backoff.
+
+    Args:
+        async_func: A callable that returns a coroutine (e.g., a lambda or async function).
+                    Will be called fresh on each retry attempt.
+    """
     attempt = 0
     while True:
         try:
-            return await awaitable
+            return await async_func()
         except Exception as e:
             # TODO: parse e and print a more informative message
             attempt += 1
