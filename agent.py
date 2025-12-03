@@ -37,20 +37,22 @@ class World:
 
 
 class Agent:
-    def __init__(self, language_model, session, init_prompt=None):
+    def __init__(self, language_model, session, transcript=None):
         self.language_model = language_model
-        if init_prompt is None: init_prompt = []
-        self.transcript = init_prompt if isinstance(init_prompt, list) else [init_prompt]
+        self.transcript = []
         self.world = World([self.task, self.discuss])
         self.session = session
         self.subagents = {}
+        self.transcript = transcript if transcript is not None else []
 
     def harken(self, input):
-        assert isinstance(input, (str, TrackedString)), "Expected a string input"
-        m = {'role':'user', 'content':str(input)}
+        role,content = (input['role'],input['content']) if isinstance(input,dict) else ('user',input)
+        assert isinstance(content, (str, TrackedString, StringWithCause)), "Expected a string input"
+        m = {'role':role, 'content':str(content)}
         self.transcript.append(m)
-        substance = input.message_id if isinstance(input, TrackedString) else None
-        self.session.log_transcript_entry(**m, agent=self, substance=substance)
+        substance = content.message_id if isinstance(content, TrackedString) else None
+        cause = content.cause if isinstance(content, StringWithCause) else None
+        self.session.log_transcript_entry(**m, agent=self, substance=substance, cause=cause)
 
     async def response(self, input=None):
         if input is not None: self.harken(input)
@@ -91,9 +93,12 @@ class Agent:
         if name in self.subagents:
             raise ValueError("There is already a subagent of this name")
         print(f'<Task name="{name}" user_prompt={"..." if user_prompt else None}/>')
-        a = Agent(language_model=self.language_model, session=self.session, init_prompt={'role':'system', 'content':system_prompt})
+        a = Agent(language_model=self.language_model, session=self.session)
         self.subagents[name] = a
         self.session.log_agent_created(agent=a, name=name, cause=self._current_tool_call, parent=self)
+        # Give it the system and user prompt
+        system_prompt = {'role':'system', 'content': StringWithCause(system_prompt,cause=[self._current_tool_call])}
+        a.harken(system_prompt)
         if user_prompt:
             user_prompt = self.session.logged_fragment(agent=self, content=user_prompt, cause=self._current_tool_call)
             res = await self.subagents[name].response(user_prompt)

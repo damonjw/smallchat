@@ -17,6 +17,8 @@ parser = argparse.ArgumentParser()
 session_group = parser.add_mutually_exclusive_group()
 session_group.add_argument('--new', action='store_true', help="Start a new chat session")
 session_group.add_argument('--resume', type=str, metavar='FILENAME', help="Resume existing chat session")
+parser.add_argument('-nw', '--no-window', action='store_true', help="Don't open browser window")
+
 
 
 def get_session(args):
@@ -49,7 +51,7 @@ def get_session(args):
     else:
         print(f"Resuming from {filename}")
         def construct_agent(session, language_model, transcript): 
-            return Agent(session=session, language_model=language_model, init_prompt=transcript)
+            return Agent(session=session, language_model=language_model, transcript=transcript)
         session = Session.load(str(filename), construct_agent)
     return session
 
@@ -70,14 +72,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
     session = get_session(args)
 
-    # Start the Flask server with SSE for live viewer updates
-    SERVER_PORT = 5000
-    print(f"Starting web viewer at http://127.0.0.1:{SERVER_PORT}")
-    start_server(session._log_filename, port=SERVER_PORT)
-
-    # Give the server a moment to start, then open the browser
-    time.sleep(0.5)
-    webbrowser.open(f'http://127.0.0.1:{SERVER_PORT}')
+    if not args.no_window:
+        SERVER_PORT = 5000
+        print(f"Starting web viewer at http://127.0.0.1:{SERVER_PORT}")
+        start_server(session._log_filename, port=SERVER_PORT)
+        time.sleep(0.5)
+        webbrowser.open(f'http://127.0.0.1:{SERVER_PORT}')
 
     try:
         asyncio.run(interact(session))

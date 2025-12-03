@@ -17,8 +17,23 @@ from threading import Thread, Lock
 import queue
 
 # Suppress werkzeug logging output (startup messages and HTTP requests)
+import sys
 import werkzeug.serving
+import werkzeug._internal
+import click
+
+# Patch werkzeug's internal logging functions
 werkzeug.serving._log = lambda *args, **kwargs: None
+werkzeug._internal._log = lambda *args, **kwargs: None
+
+# Also patch click.echo which werkzeug uses for startup messages
+_original_click_echo = click.echo
+def _silent_click_echo(message=None, **kwargs):
+    # Suppress messages that start with ' * ' (werkzeug startup messages)
+    if message and isinstance(message, str) and message.strip().startswith('*'):
+        return
+    _original_click_echo(message, **kwargs)
+click.echo = _silent_click_echo
 
 app = Flask(__name__)
 
@@ -100,6 +115,18 @@ def static_files(path):
     """Serve static files from viewer/dist/."""
     viewer_dist = Path(__file__).parent / 'viewer' / 'dist'
     return send_from_directory(viewer_dist, path)
+
+
+@app.route('/session-info')
+def session_info():
+    """Return information about the current session."""
+    with current_session_lock:
+        filepath = current_session_file
+
+    if filepath:
+        filename = os.path.basename(filepath)
+        return {'filename': filename}
+    return {'filename': 'Session'}
 
 
 @app.route('/events')
