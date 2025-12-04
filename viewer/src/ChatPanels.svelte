@@ -2,15 +2,25 @@
   import { panels, allMessages, agents } from './stores.js';
   import { deduplicateMessages } from './logParser.js';
   import Message from './Message.svelte';
-  import { getAgentBadgeColor, getAgentBorderColor } from './colors.js';
+  import ToolModal from './ToolModal.svelte';
+  import { getAgentBadgeColor, getAgentBorderColor, getAgentTextColor } from './colors.js';
 
   let nextPanelId = 1;
   let hoveredDivider = null; // Track which divider is being hovered during drag
   let hoveredPanel = null; // Track which panel is being hovered during drag
   let dragSourcePanel = null; // Track which panel an agent badge is being dragged from
+  let selectedToolMessage = null; // Track which tool message is being viewed in modal
 
   function removePanel(panelId) {
     panels.update(p => p.filter(panel => panel.id !== panelId));
+  }
+
+  function handleToolClick(toolMessage) {
+    selectedToolMessage = toolMessage;
+  }
+
+  function closeModal() {
+    selectedToolMessage = null;
   }
 
   function createNewPanel(agentId) {
@@ -195,12 +205,34 @@
           });
         }
       } else {
-        // No substance - create new row
-        rowIndex = rowGroups.length;
-        rowGroups.push({
-          substance: null,
-          messages: [msg]
-        });
+        // No substance - check if this should be grouped with previous tool_use messages
+        // If this is a tool_use message and the last row contains tool_use messages from the same agent,
+        // add it to that row instead of creating a new one
+        if (msg.role === 'assistant_tool_use' && rowGroups.length > 0) {
+          const lastRow = rowGroups[rowGroups.length - 1];
+          const lastMsg = lastRow.messages[lastRow.messages.length - 1];
+
+          // Check if last message in the last row is also a tool_use from the same agent
+          if (lastMsg.role === 'assistant_tool_use' && lastMsg.agent === msg.agent) {
+            // Add to the existing row
+            rowIndex = rowGroups.length - 1;
+            rowGroups[rowIndex].messages.push(msg);
+          } else {
+            // Create new row
+            rowIndex = rowGroups.length;
+            rowGroups.push({
+              substance: null,
+              messages: [msg]
+            });
+          }
+        } else {
+          // Create new row
+          rowIndex = rowGroups.length;
+          rowGroups.push({
+            substance: null,
+            messages: [msg]
+          });
+        }
         // Map this message's id to the row so other messages can reference it
         messageIdToRow.set(msg.id, rowIndex);
       }
@@ -209,6 +241,48 @@
     }
 
     return rowGroups;
+  }
+
+  // Group consecutive tool_use messages from the same agent
+  function groupToolMessages(messages) {
+    const result = [];
+    let i = 0;
+
+    while (i < messages.length) {
+      const msg = messages[i];
+
+      // If this is a tool_use message, check if the next messages are also tool_use from the same agent
+      if (msg.role === 'assistant_tool_use') {
+        const toolGroup = [msg];
+        let j = i + 1;
+
+        // Collect consecutive tool_use messages from the same agent
+        while (j < messages.length &&
+               messages[j].role === 'assistant_tool_use' &&
+               messages[j].agent === msg.agent) {
+          toolGroup.push(messages[j]);
+          j++;
+        }
+
+        // Add the group as a single item
+        result.push({
+          type: 'tool_group',
+          agent: msg.agent,
+          messages: toolGroup
+        });
+
+        i = j;
+      } else {
+        // Regular message
+        result.push({
+          type: 'message',
+          message: msg
+        });
+        i++;
+      }
+    }
+
+    return result;
   }
 
   // Reactive: compute per-panel deduplicated messages
@@ -365,7 +439,8 @@
           <div class="empty-state">No messages to display</div>
         {:else}
           {#each rowGroups as rowGroup, rowIndex (rowGroup.substance || `row-${rowIndex}`)}
-            <div class="message-row">
+            {@const isToolRow = rowGroup.messages.every(m => m.role === 'assistant_tool_use')}
+            <div class="message-row" class:tool-row={isToolRow}>
               {#each $panels as panel, index (panel.id)}
                 <!-- Left divider drop zone -->
                 <div
@@ -379,25 +454,55 @@
                 ></div>
 
                 <!-- Message cell -->
-                <div
-                  class="message-cell"
-                  role="region"
-                  aria-label="Panel drop zone"
-                  on:dragover={(e) => handlePanelDragOver(panel.id, e)}
-                  on:dragleave={handlePanelDragLeave}
-                  on:drop={(e) => handlePanelDrop(panel.id, e)}
-                >
-                  {#each rowGroup.messages as message (message.id)}
-                    {#if panelMessages.get(panel.id)?.has(message.id)}
-                      <Message
-                        {message}
-                        agentName={$agents[message.agent]?.name}
-                        agentId={message.agent}
-                        showPrefix={panel.agentIds.length > 1}
-                      />
-                    {/if}
-                  {/each}
-                </div>
+                {#each [panel] as p (p.id)}
+                  {@const visibleMessages = rowGroup.messages.filter(m => panelMessages.get(p.id)?.has(m.id))}
+                  {@const groupedItems = groupToolMessages(visibleMessages)}
+                  {@const isToolOnly = groupedItems.length > 0 && groupedItems.every(item => item.type === 'tool_group')}
+
+                  <div
+                    class="message-cell"
+                    class:tool-message-cell={isToolOnly}
+                    role="region"
+                    aria-label="Panel drop zone"
+                    on:dragover={(e) => handlePanelDragOver(p.id, e)}
+                    on:dragleave={handlePanelDragLeave}
+                    on:drop={(e) => handlePanelDrop(p.id, e)}
+                  >
+                    {#each groupedItems as item, itemIndex (item.type === 'tool_group' ? `tool-group-${p.id}-${rowIndex}-${itemIndex}` : item.message.id)}
+                      {#if item.type === 'tool_group'}
+                        <!-- Grouped tool messages -->
+                        <div class="tool-group">
+                          {#if p.agentIds.length > 1}
+                            {@const agentName = $agents[item.agent]?.name}
+                            {@const colorKey = item.agent + '_' + agentName}
+                            {@const textColor = getAgentTextColor(colorKey)}
+                            <span class="agent-prefix" style="color: {textColor};">[{agentName}]:</span>
+                          {/if}
+                          {#each item.messages as toolMsg (toolMsg.id)}
+                            <span
+                              class="tool-icon"
+                              role="button"
+                              tabindex="0"
+                              on:click={() => handleToolClick(toolMsg)}
+                              on:keydown={(e) => e.key === 'Enter' && handleToolClick(toolMsg)}
+                              title="Click to view tool usage details"
+                            >
+                              ○
+                            </span>
+                          {/each}
+                        </div>
+                      {:else}
+                        <!-- Regular message -->
+                        <Message
+                          message={item.message}
+                          agentName={$agents[item.message.agent]?.name}
+                          agentId={item.message.agent}
+                          showPrefix={p.agentIds.length > 1}
+                        />
+                      {/if}
+                    {/each}
+                  </div>
+                {/each}
               {/each}
 
               <!-- Right divider drop zone -->
@@ -417,6 +522,9 @@
     </div>
   {/if}
 </div>
+
+<!-- Tool Modal -->
+<ToolModal toolUseMessage={selectedToolMessage} onClose={closeModal} />
 
 <style>
   .panels-container {
@@ -542,10 +650,45 @@
     min-height: 40px;
   }
 
+  .tool-row {
+    min-height: auto; /* Remove min-height for tool-only rows */
+  }
+
   .message-cell {
     flex: 1;
     min-width: 400px;
     padding: 0.5rem 1rem;
+  }
+
+  .tool-message-cell {
+    padding: 0 1rem; /* Zero vertical padding for tool-only cells */
+  }
+
+  .tool-group {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .tool-icon {
+    font-size: 0.6rem;
+    padding: 0;
+    cursor: pointer;
+    user-select: none;
+    transition: transform 0.1s;
+  }
+
+  .tool-icon:hover {
+    transform: scale(1.2);
+  }
+
+  .tool-icon:active {
+    transform: scale(1.0);
+  }
+
+  .agent-prefix {
+    font-weight: 700;
+    margin-right: 0.5rem;
   }
 
   .empty-state {
