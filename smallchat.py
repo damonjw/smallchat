@@ -3,8 +3,11 @@ import readline  # so that `input` lets me use cursor keys
 from pathlib import Path
 import argparse
 import dotenv
+import os
+import sys
 import webbrowser
 import time
+import litellm
 from agent import Agent
 from session import Session
 from server import start_server
@@ -20,8 +23,17 @@ session_group.add_argument('--resume', type=str, metavar='FILENAME', help="Resum
 parser.add_argument('-nw', '--no-window', action='store_true', help="Don't open browser window")
 parser.add_argument('--model', type=str, default='anthropic/claude-sonnet-4-5-20250929',
                     help="Language model to use for new sessions (default: anthropic/claude-sonnet-4-5-20250929)")
+parser.add_argument('--list-models', action='store_true', help="List available models")
 
-
+def list_models():
+    keys = ['OPENAI_API_KEY', 'GEMINI_API_KEY', 'XAI_API_KEY', 'ANTHROPIC_API_KEY']
+    print(f"Model use requires an API access key in .env or as an environment variable")
+    print(f"- Providers with keys: {', '.join(k for k in keys if k in os.environ)}")
+    print(f"- Providers without keys: {', '.join(k for k in keys if k not in os.environ)}")
+    print("Available models:")
+    for m in litellm.get_valid_models(check_provider_endpoint=True):
+        print("- ",m)
+    print("Use the `--model M` option to specify the model for the primary agent")
 
 def get_session(args):
     # What do we want to do: resume session, or new session?
@@ -73,6 +85,9 @@ Create a subagent, and tell it to find the time of sunset in Cambridge today, th
 
 if __name__ == '__main__':
     args = parser.parse_args()
+    if args.list_models:
+        list_models()
+        sys.exit(0)
     session = get_session(args)
 
     if not args.no_window:
