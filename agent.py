@@ -2,7 +2,7 @@ import json
 import collections
 import inspect
 import litellm
-from utils import function_to_tool, spinner, as_described, try_repeatedly
+from utils import function_to_tool, spinner, as_described, try_repeatedly, dummy_completion
 from session import TrackedString, StringWithCause, Session
 import prompts
 
@@ -56,11 +56,12 @@ class Agent:
 
     async def response(self, input=None):
         if input is not None: self.harken(input)
-        # TODO: check if the LLM can accept a transcript that doesn't end in a 'user' message.
-        # Can it end in a system message? Can I put in an empty user message?
-        assert len(self.transcript) > 0 and self.transcript[-1]['role'] == 'user'
+        assert any(m for m in self.transcript if m['role'] != 'system'), "Need at least one non-system message to respond to"
         while True:
-            res = await try_repeatedly(lambda: spinner(litellm.acompletion(model=self.language_model, messages=self.transcript, tools=self.world.tools)))
+            if self.language_model == 'DUMMY':
+                res = dummy_completion(messages=self.transcript, tools=self.world.tools)
+            else:
+                res = await try_repeatedly(lambda: spinner(litellm.acompletion(model=self.language_model, messages=self.transcript, tools=self.world.tools)))
             res = res.choices[0].message
             self.transcript.append(res)
             tool_calls = [t.model_dump() for t in res.tool_calls] if res.tool_calls else None # sanitized json-able version
@@ -71,9 +72,12 @@ class Agent:
                 for t in res.tool_calls:
                     cause = f"{msg_id}.{t.id}"
                     self._current_tool_call = cause
-                    res = await self.world.do_action(t)
+                    try:
+                        res = await self.world.do_action(t)
+                        m = {'role':'tool', 'tool_call_id':t.id, 'name':t.function.name, 'content':str(res)}
+                    except Exception as e:
+                        m = {'role':'tool', 'tool_call_id':t.id, 'name':t.function.name, 'content':str(e), 'is_error':True}
                     del self._current_tool_call
-                    m = {'role':'tool', 'tool_call_id':t.id, 'name':t.function.name, 'content':str(res)}
                     self.transcript.append(m)
                     self.session.log_tool_use(**m,
                                               agent = self,

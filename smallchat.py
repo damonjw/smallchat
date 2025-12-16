@@ -11,6 +11,8 @@ import litellm
 from agent import Agent
 from session import Session
 from server import start_server
+import tempfile
+import atexit
 
 dotenv.load_dotenv() # loads ANTHROPIC_API_KEY into environment variables
 SESSIONS_DIR = Path('.chats')
@@ -20,6 +22,7 @@ parser = argparse.ArgumentParser()
 session_group = parser.add_mutually_exclusive_group()
 session_group.add_argument('--new', action='store_true', help="Start a new chat session")
 session_group.add_argument('--resume', type=str, metavar='FILENAME', help="Resume existing chat session")
+session_group.add_argument('--temp', action='store_true', help="Start a new temporary (unlogged, unresumable) chat session")
 parser.add_argument('-nw', '--no-window', action='store_true', help="Don't open browser window")
 parser.add_argument('--model', type=str, default='anthropic/claude-sonnet-4-5-20250929',
                     help="Language model to use for new sessions (default: anthropic/claude-sonnet-4-5-20250929)")
@@ -40,22 +43,29 @@ def get_session(args):
     if args.resume:
         action,filename = ('resume', args.resume)
     elif args.new:
+        action,filename = ('new', 'AUTO')
+    elif args.temp:
         action,filename = ('new', None)
-    else:
+    else: # resume most recent
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         filenames = list(SESSIONS_DIR.glob('*.jsonl'))
         if filenames:
             most_recent = max(filenames, key = lambda p: p.stat().st_mtime)
             action,filename = ('resume', most_recent)
         else:
-            action,filename = ('new', None)
+            action,filename = ('new', 'AUTO')
     if action == 'new':
-        i = 0
-        while True:
-            fn = SESSIONS_DIR / Path(FILENAME_PATTERN.format(i))
-            i = i + 1
-            if not fn.exists(): break
-        filename = fn
+        if not filename:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+                filename = f.name
+            atexit.register(lambda: os.unlink(filename) if os.path.exists(filename) else None)
+        else:
+            i = 0
+            while True:
+                fn = SESSIONS_DIR / Path(FILENAME_PATTERN.format(i))
+                i = i + 1
+                if not fn.exists(): break
+            filename = fn
     # Do it!
     if action == 'new':
         print(f"Logging to {filename}")

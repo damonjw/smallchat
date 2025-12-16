@@ -4,6 +4,10 @@ import time
 import itertools
 import sys
 import asyncio
+import collections
+import json
+from pathlib import Path
+import random
 
 
 async def spinner(awaitable):
@@ -185,3 +189,45 @@ def _map_simple_type(type_str):
     else:
         return 'string'
 
+
+# For offline debugging, here's a dummy LLM.
+# All it does is grab a random response from the logs
+
+DUMMY_CHAT_LOGS = '.chats/*.jsonl'
+
+DummyResponse = collections.namedtuple('DummyResponse', ['choices'])
+DummyResponseChoice = collections.namedtuple('DummyResponseChoice', ['message'])
+DummyMessage = collections.namedtuple('DummyMessage', ['role', 'content', 'tool_calls'])
+DummyFunctionCall = collections.namedtuple('DummyFunctionCall', ['name', 'arguments'])
+class DummyToolCall:
+    def __init__(self, tool_call_dict):
+        self.type = tool_call_dict['type']
+        self.id = tool_call_dict['id']
+        self.function = DummyFunctionCall(name=tool_call_dict['function']['name'], arguments=tool_call_dict['function']['arguments'])
+    def model_dump(self):
+        return {'id':self.id, 'type':self.type, 'function':{'name':self.function.name, 'arguments':self.function.arguments}}
+
+def dummy_completion(messages, tools, _cache={}):
+    if 'assistant_responses' not in _cache:
+        files = Path('.').glob(DUMMY_CHAT_LOGS)
+        assistant_responses = []
+        for fn in files:
+            with open(fn, 'r') as f:
+                for i,txt in enumerate(f.readlines()):
+                    if txt.strip() == '': continue
+                    x = json.loads(txt)
+                    if x['event_type'] != 'transcript_entry': continue
+                    if x['role'] != 'assistant': continue
+                    assistant_responses.append({k:x[k] for k in ['role','content','tool_calls'] if k in x})        
+        _cache['assistant_responses'] = assistant_responses
+    assistant_responses = _cache['assistant_responses']
+    while True:
+        # Return a random assistant message.
+        # If the proposed message includes tool_calls, make sure it's only calling tools that we actually have.
+        msg = random.choice(assistant_responses).copy()
+        if not msg.get('tool_calls',None): break
+        got_tools = set(t['function']['name'] for t in tools if 'function' in t) if tools else set()
+        msg['tool_calls'] = [DummyToolCall(t) for t in msg['tool_calls'] if t['function']['name'] in got_tools]
+        if msg['tool_calls']: break
+    msg = DummyMessage(role='assistant', content=msg.get('content', None), tool_calls=msg.get('tool_calls', None))
+    return DummyResponse(choices=[DummyResponseChoice(message=msg)])
