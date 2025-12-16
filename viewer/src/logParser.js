@@ -96,10 +96,9 @@ export function parseLog(text) {
 }
 
 /**
- * Deduplicate messages based on substance and content
+ * Deduplicate messages based on substance only
  */
 export function deduplicateMessages(messages) {
-  const seen = new Set();
   const seenSubstance = new Set();
   const result = [];
 
@@ -112,16 +111,7 @@ export function deduplicateMessages(messages) {
       seenSubstance.add(msg.substance);
     }
 
-    // Check content-based deduplication
-    // For tool_use messages, use the message id since they don't have content
-    const contentKey = msg.role === 'assistant_tool_use'
-      ? `${msg.role}:${msg.id}`
-      : `${msg.role}:${msg.content}`;
-    if (seen.has(contentKey)) {
-      continue; // Skip duplicate content
-    }
-
-    seen.add(contentKey);
+    // For messages without substance, track by ID so other messages can reference them
     if (!msg.substance) {
       seenSubstance.add(msg.id);
     }

@@ -22,6 +22,14 @@
     }
   }
 
+  function handleBackdropKeydown(e) {
+    // For accessibility: Enter or Space on backdrop should close like a click
+    if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
+      e.preventDefault();
+      onClose();
+    }
+  }
+
   function handleKeydown(e) {
     if (e.key === 'Escape') {
       onClose();
@@ -112,7 +120,7 @@
 <svelte:window on:keydown={handleKeydown} />
 
 {#if toolUseMessage}
-  <div class="modal-backdrop" on:click={handleBackdropClick} role="dialog" aria-modal="true">
+  <div class="modal-backdrop" on:click={handleBackdropClick} on:keydown={handleBackdropKeydown} role="dialog" aria-modal="true" tabindex="-1">
     <div class="modal-content">
       <div class="modal-header">
         <h2>Tool Usage Details</h2>
