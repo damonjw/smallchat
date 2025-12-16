@@ -8,6 +8,30 @@ import collections
 import json
 from pathlib import Path
 import random
+import litellm
+
+
+
+"""
+Message types:
+
+REQUEST: 
+  {role:'user', content:str}
+UTTERANCE: 
+  {role:'assistant', content:str}
+TOOL_USE: 
+  {role:'assistant', content:str?, 'tool_calls':[...]}
+  TOOL_CALL: {id:..., type:'function', function: {name:..., arguments:str}}
+TOOL: 
+  {role:'tool', tool_call_id:tool_call.id, name:tool_call.function.name, content:str, is_error:bool?}
+"""
+
+async def completion(model, messages, tools):
+    if model == 'DUMMY':
+        return dummy_completion(messages=transcript, tools=tools)
+    else:
+        res = await try_repeatedly(lambda: spinner(litellm.acompletion(model=model, messages=messages, tools=tools)))
+        return res.choices[0].message
 
 
 async def spinner(awaitable):
@@ -195,10 +219,9 @@ def _map_simple_type(type_str):
 
 DUMMY_CHAT_LOGS = '.chats/*.jsonl'
 
-DummyResponse = collections.namedtuple('DummyResponse', ['choices'])
-DummyResponseChoice = collections.namedtuple('DummyResponseChoice', ['message'])
 DummyMessage = collections.namedtuple('DummyMessage', ['role', 'content', 'tool_calls'])
 DummyFunctionCall = collections.namedtuple('DummyFunctionCall', ['name', 'arguments'])
+
 class DummyToolCall:
     def __init__(self, tool_call_dict):
         self.type = tool_call_dict['type']
@@ -229,5 +252,4 @@ def dummy_completion(messages, tools, _cache={}):
         got_tools = set(t['function']['name'] for t in tools if 'function' in t) if tools else set()
         msg['tool_calls'] = [DummyToolCall(t) for t in msg['tool_calls'] if t['function']['name'] in got_tools]
         if msg['tool_calls']: break
-    msg = DummyMessage(role='assistant', content=msg.get('content', None), tool_calls=msg.get('tool_calls', None))
-    return DummyResponse(choices=[DummyResponseChoice(message=msg)])
+    return DummyMessage(role='assistant', content=msg.get('content', None), tool_calls=msg.get('tool_calls', None))

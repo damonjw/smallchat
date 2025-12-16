@@ -27,6 +27,27 @@ than "web_searcher".
 
 """
 
+HOOK = """
+This tool creates a hook, which can be used to enforce policies that the user has asked you to adhere to. 
+
+The hook will will monitor everything that you say, and if necessary issue reminders or corrections.
+If the hook decides that what you said is acceptable, what you say will be conveyed back to the user.
+If not, it will tell you why it's not acceptable.
+"""
+
+HOOK_SYSTEM = """
+Your job is to evaluate the most recent request/response pair in a log, to ensure that the response adheres to policy.
+The policy will be provided below. If the response adheres to policy, then output the single word ok.
+Otherwise, explain why the response does not adhere to policy. Use the read_log tool to read from the log.
+"""
+
+MEMO = """
+This tool is for making a note to yourself.
+"""
+
+READ_LOG = """
+This tool reads a request/response pair from the log.
+"""
 
 
 DISCUSS = """
@@ -67,3 +88,4 @@ You will have no insight into how the subagent come up with their responses. You
 the subagent's response to this round of the discussion. You should put into the prompt any
 instructions you want to give about what that response should include.
 """
+

@@ -181,16 +181,20 @@ class Session:
         return TrackedString(content, message_id=msg_id)
 
     def log_agent_created(self, agent, name, parent, **kwargs):
-        assert name is not None, "Agents must be named"
         if parent == 'user': self.interlocutor = agent
-        base_agent_id = ''.join(c if c.isalnum() or c == '_' else '_' for c in name.lower()).strip('_')
+        assert name is not None, "Agents must be named"
+        agent_id = self._make_agent_id(agent=agent, base_name=name)
+        log = kwargs | {'event_type': 'agent_created', 'agent': agent_id, 'name': name, 'parent': self.agent_id[parent], 'language_model': agent.language_model}
+        return self._write(log, required=self.AGENT_CREATED)
+
+    def _make_agent_id(self, agent, base_name):
+        base_agent_id = ''.join(c if c.isalnum() or c == '_' else '_' for c in base_name.lower()).strip('_')
         agent_id,i = base_agent_id,1
         while agent_id in self.agent_id.values():
             agent_id = f"{base_agent_id}{i}"
             i = i + 1
         self.agent_id[agent] = agent_id
-        log = kwargs | {'event_type': 'agent_created', 'agent': agent_id, 'name': name, 'parent': self.agent_id[parent], 'language_model': agent.language_model}
-        return self._write(log, required=self.AGENT_CREATED)
+        return agent_id        
 
     def _write(self, log, required):
         for k in required: assert k in log, f"Log requires field {k}"

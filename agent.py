@@ -1,8 +1,7 @@
 import json
 import collections
 import inspect
-import litellm
-from utils import function_to_tool, spinner, as_described, try_repeatedly, dummy_completion
+from utils import function_to_tool, as_described, completion
 from session import TrackedString, StringWithCause, Session
 import prompts
 
@@ -23,6 +22,10 @@ class World:
             n[f.__name__] = i + 1
         self.tools = EXTERNAL_TOOLS + [function_to_tool(f,name=n) for n,f in self.f.items()]
 
+    def with_tools(self, extra_tools):
+        got_tools = list(self.f.values())
+        return World(got_tools + [t for t in extra_tools if t not in got_tools])
+
     async def do_action(self, t):
         """Perform an action and return a string result.
 
@@ -36,19 +39,21 @@ class World:
         return res
 
 
+
 class Agent:
     def __init__(self, language_model, session, transcript=None):
         self.language_model = language_model
         self.transcript = []
-        self.world = World([self.task, self.discuss])
+        self.world = World([self.task, self.discuss, self.hook])
         self.session = session
         self.subagents = {}
         self.transcript = transcript if transcript is not None else []
+        self.hooks = [] # In the future, there'll be tools to add hooks
 
     def harken(self, input):
-        role,content = (input['role'],input['content']) if isinstance(input,dict) else ('user',input)
+        role,content,extra = (input['role'],input['content'],input) if isinstance(input,dict) else ('user',input,{})
         assert isinstance(content, (str, TrackedString, StringWithCause)), "Expected a string input"
-        m = {'role':role, 'content':str(content)}
+        m = extra | {'role':role, 'content':str(content)}
         self.transcript.append(m)
         substance = content.message_id if isinstance(content, TrackedString) else None
         cause = content.cause if isinstance(content, StringWithCause) else None
@@ -58,25 +63,22 @@ class Agent:
         if input is not None: self.harken(input)
         assert any(m for m in self.transcript if m['role'] != 'system'), "Need at least one non-system message to respond to"
         while True:
-            if self.language_model == 'DUMMY':
-                res = dummy_completion(messages=self.transcript, tools=self.world.tools)
-            else:
-                res = await try_repeatedly(lambda: spinner(litellm.acompletion(model=self.language_model, messages=self.transcript, tools=self.world.tools)))
-            res = res.choices[0].message
+            res = await completion(model=self.language_model, messages=self.transcript, tools=self.world.tools)
             self.transcript.append(res)
             tool_calls = [t.model_dump() for t in res.tool_calls] if res.tool_calls else None # sanitized json-able version
             msg_id = self.session.log_transcript_entry(role=res.role, content=res.content, tool_calls=tool_calls, agent=self)
-            if not res.tool_calls:
-                return TrackedString(res.content, message_id=msg_id)
-            else:
+            # Call all the tool_calls, put their result in the transcript, then continue and see what the LLM says to do next.
+            # I'm setting self._current_tool_call so that my internal tools can log the cause.
+            # It'd be cleaner to call world.do_action(t,current_tool_call), but then the tools would have to accept
+            # an extra argument, and I don't like adding arguments purely for logging purposes.
+            if res.tool_calls:
                 for t in res.tool_calls:
-                    cause = f"{msg_id}.{t.id}"
-                    self._current_tool_call = cause
-                    try:
-                        res = await self.world.do_action(t)
-                        m = {'role':'tool', 'tool_call_id':t.id, 'name':t.function.name, 'content':str(res)}
-                    except Exception as e:
-                        m = {'role':'tool', 'tool_call_id':t.id, 'name':t.function.name, 'content':str(e), 'is_error':True}
+                    self._current_tool_call = f"{msg_id}.{t.id}"
+                    #try:
+                    res = await self.world.do_action(t)
+                    m = {'role':'tool', 'tool_call_id':t.id, 'name':t.function.name, 'content':str(res)}
+                    #except Exception as e:
+                    #    m = {'role':'tool', 'tool_call_id':t.id, 'name':t.function.name, 'content':str(e), 'is_error':True}
                     del self._current_tool_call
                     self.transcript.append(m)
                     self.session.log_tool_use(**m,
@@ -84,6 +86,36 @@ class Agent:
                                               tool_call = msg_id,
                                               substance = res.message_id if isinstance(res,TrackedString) else None,
                                               cause = res.cause if isinstance(res,StringWithCause) else None)
+                continue # repeat the agentic loop
+            # Run the response (res.content, just added to the transcript) past all my hooks.
+            # If any hook has a problem, note it down as a user message, then try again
+            problem = None
+            for h in self.hooks:
+                problem = await h.comment_on_last_response()
+                if problem is not None:
+                    self.harken(problem)
+                    break
+            if problem is not None:
+                continue # repeat the agentic loop
+            # We've come to the end of agentic processing. Return the result to the user.
+            return TrackedString(res.content, message_id=msg_id)
+
+
+    @as_described(prompts.HOOK)
+    async def hook(self, instructions):
+        """
+        Args:
+          instructions (string): the prompt to be used by the hook whenever it evaluates an utterance
+        """
+        # TODO: would any extra logging of string provenance be useful?
+        print(f"<Hook {len(self.hooks)+1}>")
+        a = Agent(language_model=self.language_model, session=self.session)
+        h = SmartHook(monitored_agent=self, internal_agent=a, prompt=instructions)
+        self.session.log_agent_created(agent=a, name='hook_', parent=self, cause=self._current_tool_call, role='hook')
+        self.hooks.append(h)
+        # Give it a system prompt
+        system_prompt = prompts.HOOK_SYSTEM
+        a.harken({'role':'system', 'content':system_prompt})
 
 
     @as_described(prompts.TASK)
@@ -99,14 +131,14 @@ class Agent:
         print(f'<Task name="{name}" user_prompt={"..." if user_prompt else None}/>')
         a = Agent(language_model=self.language_model, session=self.session)
         self.subagents[name] = a
-        self.session.log_agent_created(agent=a, name=name, cause=self._current_tool_call, parent=self)
+        self.session.log_agent_created(agent=a, name=name, parent=self, cause=self._current_tool_call, role='child')
         # Give it the system and user prompt
         system_prompt = {'role':'system', 'content': StringWithCause(system_prompt,cause=[self._current_tool_call])}
         a.harken(system_prompt)
         if user_prompt:
             user_prompt = self.session.logged_fragment(agent=self, content=user_prompt, cause=self._current_tool_call)
             res = await self.subagents[name].response(user_prompt)
-            return res
+            return None
         else:
             return json.dumps({'subagents': list(self.subagents.keys()), 'status': f"Created subagent: {name}"})
 
@@ -168,3 +200,67 @@ class Agent:
                     self.subagents[t].harken(msg)
                 res.append(msg)
             return StringWithCause('\n\n'.join(str(r) for r in res), cause=[r.message_id for r in res])
+
+
+
+class SmartHook:
+    def __init__(self, monitored_agent, internal_agent, prompt):
+        self.monitored_agent = monitored_agent
+        self.internal_agent = internal_agent
+        self.internal_agent.world = self.internal_agent.world.with_tools([self.memo, self.read_log])
+        self.prompt = prompt
+        self._transcript_additions = []
+
+    async def comment_on_last_response(self):
+        # I'll let the internal agent use its transcript for working, then at the end of this call I'll reset it
+        # to the length it is now (except for anything it explicitly decides it needs to remember).
+        _original_transcript_length = len(self.internal_agent.transcript)
+        self._transcript_additions = []
+        # Instruct the internal agent to evaluate the monitored_agent's last response, and give it the preliminary data it needs.
+        self.internal_agent.harken(self.prompt)
+        self.internal_agent.harken({'role': 'assistant', 
+                                    'content': "Reading the last request/response pair",
+                                    'tool_calls': [{'id':'ephemeral1', 'type':'function', 'function':{'name':'read_log', 'arguments':'{"n": -1}'}}]})
+        self.internal_agent.harken({'role': 'tool',
+                                    'content': self.read_log(-1),
+                                    'tool_call_id': 'ephemeral1',
+                                    'name': 'read_log'})
+        res = await self.internal_agent.response()
+        # Wipe this conversation from the internal_agent's memory
+        self.internal_agent.transcript = self.internal_agent.transcript[:_original_transcript_length]
+        if self._transcript_additions:
+            self.internal_agent.transcript.extend(self._transcript_additions)
+        # Return an error message, or None if it's OK
+        return None if res.strip().lower() == 'ok' else res
+
+    @as_described(prompts.MEMO)
+    def memo(self, content):
+        """
+        Args:
+          content (string): the memo to yourself, which will be recorded in the chat history
+        """
+        msg = {'role': 'user', 'content': content}
+        self.internal_agent.harken(msg)
+        self._transcript_additions.append(msg)
+        return "Noted"
+
+    @as_described(prompts.READ_LOG)
+    def read_log(self, n):
+        """
+        Args:
+          n (int): Which log item to read. Use standard Python indexing, e.g. n=-1 gets the most recent log item, n=0 gets the first.
+        """
+        _request_index = [i for i,m in enumerate(self.monitored_agent.transcript) if m['role'] == 'user']
+        n = int(n)
+        if abs(n) > len(_request_index):
+            raise Exception(f"The index n={n} is invalid, since there are only {len(_request_index)} pairs in the log")
+        i = _request_index[n]
+        req = self.monitored_agent.transcript[i]
+        resp = {}
+        for j in range(i+1, len(self.monitored_agent.transcript)):
+            msg = self.monitored_agent.transcript[j]
+            if msg['role'] == 'assistant' and not msg.get('tool_calls',None):
+                resp = msg
+        res = {'request': req.get('content',None), 'response': resp.get('content',None), 'n': n if n>=0 else len(_request_index)+n}
+        return json.dumps(res)
+        
