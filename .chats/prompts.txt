@@ -8,7 +8,7 @@ Here's the scenario. They meet by chance in a cafe. Jack is possibly looking for
 
 -----------------
 
-Create a subagent, and tell it to find the time of sunset in Cambridge today, then report the answer back to me.
+Create a subagent, and tell it to find the time of sunset in Aberdeen today, then report the answer back to me.
 
 ----
 
@@ -21,3 +21,7 @@ Create two subagents, call them Jack and Jill. Jack works in HR, and Jill is an 
 Tell each of them (privately) to create an "cornerstone" i.e. "inner self" subagent to support an interior monologue, or chain-of-thought. A cornerstone is a foundational memory or defining experience that shapes a person's core identity, values, and behavioral patterns. It serves as an anchor point from which personality, motivations, and responses emerge—creating psychological coherence by grounding decisions and reactions in a consistent backstory or formative event. The cornerstone should function more like a gut instinct than like a therapist -- it says what it thinks, it doesn't try and give a pep talk. The cornerstone isn't all sweetness and light -- it's behind all aspects of personality, both the good and the bad. In essence: a cornerstone is the "why" behind who someone is, providing emotional and narrative continuity to their character. The cornerstone is behind *everything* that a person does. When either Jack or Jill says responds in the conversation, they should first consult their inner self, and then report back *only* the final utterance. They may find it useful to have a back-and-forth with their cornerstone.  You must give this instruction to each of them privately, since they should not be told about the other's cornerstone.
 
 Here's the scenario. They meet by chance in a cafe. Each is possibly looking for romance, but it's not clear if they're suited to each other. Run a discussion between them, for long enough that their romantic chances are clear. If they drift into giving stage directions, remind them (privately) to respond with speech only.
+
+----
+
+Create a hook for yourself that only allows responses whose last letter is y. (Additional punctuation after the y is allowed.)

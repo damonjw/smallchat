@@ -35,20 +35,6 @@ If the hook decides that what you said is acceptable, what you say will be conve
 If not, it will tell you why it's not acceptable.
 """
 
-HOOK_SYSTEM = """
-Your job is to evaluate the most recent request/response pair in a log, to ensure that the response adheres to policy.
-The policy will be provided below. If the response adheres to policy, then output the single word ok.
-Otherwise, explain why the response does not adhere to policy. Use the read_log tool to read from the log.
-"""
-
-MEMO = """
-This tool is for making a note to yourself.
-"""
-
-READ_LOG = """
-This tool reads a request/response pair from the log.
-"""
-
 
 DISCUSS = """
 This tool chairs a round of discussion among subagents. The subagents should previously 

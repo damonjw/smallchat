@@ -93,12 +93,29 @@ class Agent:
             for h in self.hooks:
                 problem = await h.comment_on_last_response()
                 if problem is not None:
-                    self.harken(problem)
+                    self.harken(f"<system>{problem}</system>")
                     break
             if problem is not None:
                 continue # repeat the agentic loop
             # We've come to the end of agentic processing. Return the result to the user.
             return TrackedString(res.content, message_id=msg_id)
+
+
+    def recall(self, n):
+        # Read a prompt / response from the transcript.
+        # TODO: this will evolve, as I figure out what sort of transcript-reading is useful
+        request_index = [i for i,m in enumerate(self.transcript) if m['role'] == 'user' and not m['content'].startswith('<system>')]
+        if n<0: n = len(request_index) + n
+        i = request_index[n]
+        req = self.transcript[i]
+        inext = request_index[n+1] if n+1<len(request_index) else len(self.transcript)
+        resp = {}        
+        for j in range(inext-1, i, -1):
+            msg = self.transcript[j]
+            if msg['role'] == 'assistant' and not msg.get('tool_calls',None):
+                resp = msg
+                break
+        return {'request': req.get('content',None), 'response': resp.get('content',None), 'n': n}
 
 
     @as_described(prompts.HOOK)
@@ -114,7 +131,7 @@ class Agent:
         self.session.log_agent_created(agent=a, name='hook_', parent=self, cause=self._current_tool_call, role='hook')
         self.hooks.append(h)
         # Give it a system prompt
-        system_prompt = prompts.HOOK_SYSTEM
+        system_prompt = SmartHook.SYSTEM
         a.harken({'role':'system', 'content':system_prompt})
 
 
@@ -138,7 +155,7 @@ class Agent:
         if user_prompt:
             user_prompt = self.session.logged_fragment(agent=self, content=user_prompt, cause=self._current_tool_call)
             res = await self.subagents[name].response(user_prompt)
-            return None
+            return res
         else:
             return json.dumps({'subagents': list(self.subagents.keys()), 'status': f"Created subagent: {name}"})
 
@@ -204,18 +221,26 @@ class Agent:
 
 
 class SmartHook:
+    SYSTEM = """Your job is to evaluate the most recent request/response pair in a log, and to check 
+if the response is acceptable. The requirements for a response to be acceptable are provided below.
+- If the response is acceptable, simply respond OK.
+- If the response is unacceptable, use the reject tool to mark it as unacceptable.
+"""
+
+
     def __init__(self, monitored_agent, internal_agent, prompt):
         self.monitored_agent = monitored_agent
         self.internal_agent = internal_agent
-        self.internal_agent.world = self.internal_agent.world.with_tools([self.memo, self.read_log])
+        self.internal_agent.world = self.internal_agent.world.with_tools([self.reject, self.read_log])
         self.prompt = prompt
         self._transcript_additions = []
 
     async def comment_on_last_response(self):
         # I'll let the internal agent use its transcript for working, then at the end of this call I'll reset it
         # to the length it is now (except for anything it explicitly decides it needs to remember).
+        # TODO: it'd make more sense to have this transcript-session grow until the response is finally approved.
         _original_transcript_length = len(self.internal_agent.transcript)
-        self._transcript_additions = []
+        self._denied = None
         # Instruct the internal agent to evaluate the monitored_agent's last response, and give it the preliminary data it needs.
         self.internal_agent.harken(self.prompt)
         self.internal_agent.harken({'role': 'assistant', 
@@ -228,39 +253,24 @@ class SmartHook:
         res = await self.internal_agent.response()
         # Wipe this conversation from the internal_agent's memory
         self.internal_agent.transcript = self.internal_agent.transcript[:_original_transcript_length]
-        if self._transcript_additions:
-            self.internal_agent.transcript.extend(self._transcript_additions)
         # Return an error message, or None if it's OK
-        return None if res.strip().lower() == 'ok' else res
+        return self._denied
 
-    @as_described(prompts.MEMO)
-    def memo(self, content):
+    @as_described("Use this tool to mark a response as unacceptable.")
+    def reject(self, reason):
         """
         Args:
-          content (string): the memo to yourself, which will be recorded in the chat history
+          reason (str): The reason why this response is unacceptable, and a reminder of what is acceptable
         """
-        msg = {'role': 'user', 'content': content}
-        self.internal_agent.harken(msg)
-        self._transcript_additions.append(msg)
-        return "Noted"
+        self._denied = reason
+        return "response status: denied"
 
-    @as_described(prompts.READ_LOG)
+    @as_described("This tool reads a request/response pair from the log.")
     def read_log(self, n):
         """
         Args:
           n (int): Which log item to read. Use standard Python indexing, e.g. n=-1 gets the most recent log item, n=0 gets the first.
         """
-        _request_index = [i for i,m in enumerate(self.monitored_agent.transcript) if m['role'] == 'user']
-        n = int(n)
-        if abs(n) > len(_request_index):
-            raise Exception(f"The index n={n} is invalid, since there are only {len(_request_index)} pairs in the log")
-        i = _request_index[n]
-        req = self.monitored_agent.transcript[i]
-        resp = {}
-        for j in range(i+1, len(self.monitored_agent.transcript)):
-            msg = self.monitored_agent.transcript[j]
-            if msg['role'] == 'assistant' and not msg.get('tool_calls',None):
-                resp = msg
-        res = {'request': req.get('content',None), 'response': resp.get('content',None), 'n': n if n>=0 else len(_request_index)+n}
-        return json.dumps(res)
+        return json.dumps(self.monitored_agent.recall(n))
+
         
