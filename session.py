@@ -164,7 +164,8 @@ class Session:
     TRANSCRIPT_ENTRY = {'event_type', 'agent', 'role', 'content'} # may also have substance or cause
     TOOL_USE_ENTRY = {'event_type', 'agent', 'role', 'tool_call', 'tool_call_id', 'name'} # may also have substance or cause
     FRAGMENT = {'event_type', 'agent', 'content', 'cause'}
-    AGENT_CREATED = {'event_type', 'agent', 'name', 'parent', 'cause', 'language_model'}
+    AGENT_CREATED = {'event_type', 'agent', 'name', 'parent', 'cause', 'language_model', 'role'}
+    TRANSCRIPT_EDIT = {'event_type', 'agent', 'action'}
     LOG_KEY_ORDER = ['message_id', 'event_type', 'agent', 'role', 'content', 'name', 'substance', 'cause', 'parent', 'language_model', 'tool_call', 'tool_call_id']
 
     def log_transcript_entry(self, agent, **kwargs):
@@ -174,6 +175,10 @@ class Session:
     def log_tool_use(self, agent, **kwargs):
         log = kwargs | {'event_type': 'transcript_entry', 'agent': self.agent_id[agent]}
         return self._write(log, required=self.TOOL_USE_ENTRY)
+
+    def log_transcript_edit(self, agent, **kwargs):
+        log = kwargs | {'event_type': 'transcript_edit', 'agent': self.agent_id[agent]}
+        return self._write(log, required=self.TRANSCRIPT_EDIT)
 
     def logged_fragment(self, agent, content, **kwargs):
         log = kwargs | {'event_type': 'fragment', 'agent': self.agent_id[agent], 'content': content}
@@ -207,10 +212,10 @@ class Session:
             f.write(json.dumps(log) + '\n\n')           
         return msg_id
     
-    AgentSpec = collections.namedtuple('AgentSpec', ['language_model', 'transcript', 'subagents'])
+    AgentSpec = collections.namedtuple('AgentSpec', ['language_model', 'transcript', 'subagents', 'hooks'])
 
     @staticmethod
-    def load(filename, construct_agent):
+    def load(filename, construct_agent, construct_hook):
         session = Session(filename)
         agentspec = {}  # agent_id -> AgentSpec
         interlocutor_id = None
@@ -226,15 +231,20 @@ class Session:
                 event = json.loads(line)
                 msg_id, event_type = event['message_id'], event['event_type']
                 if msg_id.isdigit(): max_message_id = max(max_message_id, int(msg_id))
-                if event_type == 'agent_created':
+                if event_type == 'agent_created' and event.get('role', 'child') in ['child','primary']:
                     # Question. Should we rely on special events like this, or should we be parsing the tools?
-                    a = Session.AgentSpec(language_model=event['language_model'], transcript=[], subagents={})
+                    a = Session.AgentSpec(language_model=event['language_model'], transcript=[], subagents={}, hooks=[])
                     agent_id, name, parent_id = event['agent'], event['name'], event['parent']
                     agentspec[agent_id] = a
                     if parent_id == 'user':
                         interlocutor_id = agent_id
                     else:
                         agentspec[parent_id].subagents[name] = agent_id
+                elif event_type == 'agent_created' and event.get('role', None) == 'hook':
+                    a = Session.AgentSpec(language_model=event['language_model'], transcript=[], subagents={}, hooks=[])
+                    agent_id, name, parent_id = event['agent'], event['name'], event['parent']
+                    agentspec[agent_id] = a
+                    agentspec[parent_id].hooks.append(agent_id)
                 elif event_type == 'transcript_entry':
                     msg = {'role': event['role']}
                     KEYS = ['content', 'tool_calls', 'name', 'tool_call_id']
@@ -245,6 +255,10 @@ class Session:
                     agentspec[agent_id].transcript.append(msg)
                 elif event_type == 'fragment':
                     pass
+                elif event_type == 'transcript_edit' and event.get('action',None)=='truncate':
+                    agent_id, n = event['agent'], event['n']
+                    a = agentspec[agent_id]
+                    a.transcript[:] = a.transcript[:n]
                 else:
                     raise ValueError(event)
         # Restore the state based on the replayed event log
@@ -254,7 +268,9 @@ class Session:
             agents[agent_id] = agent
             session.agent_id[agent] = agent_id
         for agent_id,spec in agentspec.items():
-            agents[agent_id].subagents = {name:agents[sid] for name,sid in spec.subagents.items()}
+            parent = agents[agent_id]
+            parent.subagents = {name:agents[sid] for name,sid in spec.subagents.items()}
+            parent.hooks = [construct_hook(monitored_agent=parent, internal_agent=agents[hid]) for hid in spec.hooks]
         session.interlocutor = agents[interlocutor_id]
         session.next_message_id = max_message_id + 1
         return session

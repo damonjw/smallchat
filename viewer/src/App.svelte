@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { agents, allMessages, logData, panels } from './stores.js';
-  import { parseLog } from './logParser.js';
+  import { parseLog, processEvent } from './logParser.js';
   import AgentHierarchy from './AgentHierarchy.svelte';
   import ChatPanels from './ChatPanels.svelte';
 
@@ -10,56 +10,19 @@
   let liveMode = false;
 
   // State for incremental message processing
-  let agentsMap = {};
-  let messagesList = [];
+  const state = {
+    agents: {},
+    messages: [],
+    hooksByParent: new Map(),
+    toolResults: new Map()
+  };
 
-  function processEvent(event) {
-    if (event.event_type === 'agent_created') {
-      // Create or update agent
-      if (!agentsMap[event.agent]) {
-        agentsMap[event.agent] = {
-          id: event.agent,
-          name: event.name,
-          parent: event.parent,
-          children: [],
-          systemPrompts: []
-        };
+  function handleEvent(event) {
+    processEvent(event, state);
 
-        // Update parent's children list
-        if (event.parent && event.parent !== 'user' && agentsMap[event.parent]) {
-          if (!agentsMap[event.parent].children.includes(event.agent)) {
-            agentsMap[event.parent].children.push(event.agent);
-          }
-        }
-
-        // Update store
-        agents.set({ ...agentsMap });
-      }
-    } else if (event.event_type === 'transcript_entry') {
-      // Handle system prompts
-      if (event.role === 'system' && agentsMap[event.agent]) {
-        agentsMap[event.agent].systemPrompts.push(event.content);
-        agents.set({ ...agentsMap });
-        return;
-      }
-
-      // Process messages (only user inputs and assistant utterances without tool_calls)
-      if (event.role === 'user' || (event.role === 'assistant' && !event.tool_calls)) {
-        // Add message (no global deduplication - will be done per-panel)
-        const msg = {
-          id: event.message_id,
-          agent: event.agent,
-          role: event.role,
-          content: event.content,
-          substance: event.substance
-        };
-
-        messagesList.push(msg);
-
-        // Update store
-        allMessages.set([...messagesList]);
-      }
-    }
+    // Update stores with new state
+    agents.set({ ...state.agents });
+    allMessages.set([...state.messages]);
   }
 
   function connectToSSE() {
@@ -67,7 +30,7 @@
 
     eventSource.onmessage = (e) => {
       const event = JSON.parse(e.data);
-      processEvent(event);
+      handleEvent(event);
       if (!fileLoaded) {
         fileLoaded = true;
         liveMode = true;

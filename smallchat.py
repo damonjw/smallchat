@@ -8,7 +8,7 @@ import sys
 import webbrowser
 import time
 import litellm
-from agent import Agent
+from agent import Agent, SmartHook
 from session import Session
 from server import start_server
 import tempfile
@@ -72,12 +72,14 @@ def get_session(args):
         print(f"Using language model: {args.model}")
         session = Session(str(filename))
         a = Agent(session=session, language_model=args.model)
-        session.log_agent_created(a, cause='user', parent='user', name='Primary')
+        session.log_agent_created(a, cause='user', parent='user', name='Primary', role='primary')
     else:
         print(f"Resuming from {filename}")
         def construct_agent(session, language_model, transcript): 
             return Agent(session=session, language_model=language_model, transcript=transcript)
-        session = Session.load(str(filename), construct_agent)
+        def construct_hook(monitored_agent, internal_agent):
+            return SmartHook(monitored_agent=monitored_agent, internal_agent=internal_agent, prompt=None)
+        session = Session.load(str(filename), construct_agent, construct_hook)
     return session
 
 

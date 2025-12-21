@@ -8,9 +8,17 @@
 
   let expanded = true;
 
+  $: hookCount = agent.hookCount || 0;
+  $: hooks = (agent.hooks || []).map(hookId => $agents[hookId]).filter(Boolean);
+
   function handleDragStart(e) {
     e.dataTransfer.effectAllowed = 'copy';
     e.dataTransfer.setData('application/json', JSON.stringify({ agentId: agent.id }));
+  }
+
+  function handleHookDragStart(e, hookAgentId) {
+    e.dataTransfer.effectAllowed = 'copy';
+    e.dataTransfer.setData('application/json', JSON.stringify({ agentId: hookAgentId }));
   }
 
   function toggleExpand() {
@@ -55,6 +63,19 @@
     >
       {agent.name}
     </span>
+
+    {#each hooks as hook (hook.id)}
+      <span
+        class="hook-indicator"
+        title="Hook: {hook.name}"
+        role="button"
+        tabindex="0"
+        draggable="true"
+        on:dragstart={(e) => handleHookDragStart(e, hook.id)}
+      >
+        H
+      </span>
+    {/each}
 
     {#if hasSingleChild}
       <span class="separator">▸</span>
@@ -125,5 +146,15 @@
 
   .agent-badge:hover {
     transform: translateY(-1px);
+  }
+
+  .hook-indicator {
+    margin-left: 0.4rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #666;
+    opacity: 0.8;
+    cursor: move;
+    user-select: none;
   }
 </style>

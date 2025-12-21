@@ -117,6 +117,10 @@ class Agent:
                 break
         return {'request': req.get('content',None), 'response': resp.get('content',None), 'n': n}
 
+    def reset_transcript(self, n):
+        self.transcript = self.transcript[:n]
+        self.session.log_transcript_edit(agent=self, action='truncate', n=n)
+
 
     @as_described(prompts.HOOK)
     async def hook(self, instructions):
@@ -130,9 +134,6 @@ class Agent:
         h = SmartHook(monitored_agent=self, internal_agent=a, prompt=instructions)
         self.session.log_agent_created(agent=a, name='hook_', parent=self, cause=self._current_tool_call, role='hook')
         self.hooks.append(h)
-        # Give it a system prompt
-        system_prompt = SmartHook.SYSTEM
-        a.harken({'role':'system', 'content':system_prompt})
 
 
     @as_described(prompts.TASK)
@@ -228,12 +229,17 @@ if the response is acceptable. The requirements for a response to be acceptable 
 """
 
 
-    def __init__(self, monitored_agent, internal_agent, prompt):
+    def __init__(self, monitored_agent, internal_agent, prompt=None):
         self.monitored_agent = monitored_agent
         self.internal_agent = internal_agent
         self.internal_agent.world = self.internal_agent.world.with_tools([self.reject, self.read_log])
-        self.prompt = prompt
-        self._transcript_additions = []
+        # In operation, we'll construct a SmartHook with a blank internal agent, and specify a prompt.
+        # In resumption, the internal_agent will already have its transcript specified, including system prompt and prompt.
+        assert len(internal_agent.transcript)==0 or prompt is None, "Specify either a blank internal agent or a prompt"
+        if prompt is not None:
+            self.internal_agent.harken({'role':'system', 'content':SmartHook.SYSTEM})
+            self.internal_agent.harken(prompt)
+        # Note the invariant: internal_agent.transcript[-1] == prompt
 
     async def comment_on_last_response(self):
         # I'll let the internal agent use its transcript for working, then at the end of this call I'll reset it
@@ -242,17 +248,18 @@ if the response is acceptable. The requirements for a response to be acceptable 
         _original_transcript_length = len(self.internal_agent.transcript)
         self._denied = None
         # Instruct the internal agent to evaluate the monitored_agent's last response, and give it the preliminary data it needs.
-        self.internal_agent.harken(self.prompt)
+        # Note that the instructions are already there in self.transcript[-1]
         self.internal_agent.harken({'role': 'assistant', 
                                     'content': "Reading the last request/response pair",
-                                    'tool_calls': [{'id':'ephemeral1', 'type':'function', 'function':{'name':'read_log', 'arguments':'{"n": -1}'}}]})
+                                    'tool_calls': [{'id':'ephemeral_1', 'type':'function', 'function':{'name':'read_log', 'arguments':'{"n": -1}'}}]})
+        last_message = self.monitored_agent.recall(-1) # or I could call self.read_log(-1)
         self.internal_agent.harken({'role': 'tool',
-                                    'content': self.read_log(-1),
-                                    'tool_call_id': 'ephemeral1',
+                                    'content': json.dumps(last_message),
+                                    'tool_call_id': 'ephemeral_1',
                                     'name': 'read_log'})
         res = await self.internal_agent.response()
         # Wipe this conversation from the internal_agent's memory
-        self.internal_agent.transcript = self.internal_agent.transcript[:_original_transcript_length]
+        self.internal_agent.reset_transcript(_original_transcript_length)
         # Return an error message, or None if it's OK
         return self._denied
 

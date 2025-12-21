@@ -8,18 +8,27 @@
 
   $: isUser = message.role === 'user';
   $: isAssistant = message.role === 'assistant';
+  $: isFailed = message.isFailed || false;
+  $: isSystemRejection = message.isSystemRejection || false;
   $: colorKey = agentId && agentName ? (agentId + '_' + agentName) : agentId;
   $: textColor = colorKey ? getAgentTextColor(colorKey) : '#333';
 </script>
 
-<div class="message" class:user={isUser} class:assistant={isAssistant}>
-  {#if isAssistant && showPrefix && agentName}
-    <div class="message-content">
+<div class="message"
+     class:user={isUser}
+     class:assistant={isAssistant}
+     class:system-rejection={isSystemRejection}>
+  {#if isSystemRejection}
+    <div class="message-content system-rejection-content">
+      {message.content}
+    </div>
+  {:else if isAssistant && showPrefix && agentName}
+    <div class="message-content" class:strikethrough={isFailed}>
       <span class="agent-prefix" style="color: {textColor};">[{agentName}]:</span>
       {message.content}
     </div>
   {:else}
-    <div class="message-content">
+    <div class="message-content" class:strikethrough={isFailed}>
       {message.content}
     </div>
   {/if}
@@ -53,5 +62,14 @@
   .agent-prefix {
     font-weight: 700;
     margin-right: 0.5rem;
+  }
+
+  .system-rejection-content {
+    font-family: 'Courier New', Courier, monospace;
+  }
+
+  .strikethrough {
+    text-decoration: line-through;
+    opacity: 0.6;
   }
 </style>
